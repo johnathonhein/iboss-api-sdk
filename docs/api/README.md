@@ -18,7 +18,7 @@ gotchas.
 | [resources.md](resources.md) | Resources | `client.resources` | the Resource catalog: SaaS apps, private apps/services used by Resource Policies |
 | [locations-pac.md](locations-pac.md) | Connect Devices & Locations → Locations & Geo Zones | `client.locations` | locations (PAC zones), private networks |
 | [firewall.md](firewall.md) | Secure Access Policies → Firewall | `client.firewall` | firewall rules and firewall settings |
-| [proxy-and-caching.md](proxy-and-caching.md) | Network → Proxy & Caching | `client.network` | proxy settings and proxy logging |
+| [proxy-and-caching.md](proxy-and-caching.md) | Network → Proxy & Caching | `client.network` | proxy settings, proxy logging, verified ACL rule moves |
 | [ssl-decryption.md](ssl-decryption.md) | Network → SSL Decryption | `client.ssl` | HTTPS decryption settings and bypasses |
 | [dlp.md](dlp.md) | DLP | `client.dlp` | content analysis rules, DLP responses, converters |
 | [users-and-devices.md](users-and-devices.md) | Resources, Users & Assets | `client.directory` | static proxy users and devices |

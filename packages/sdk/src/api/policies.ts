@@ -26,7 +26,7 @@
  * Resource Policies MUST include dlpPolicyMethod: 2 in every settings payload
  * (createLayer / createResourcePolicy add it when isZeroTrustResourcePolicy: 1).
  */
-import { IbossApiError, IbossError, IbossVerifyError } from "../client/errors.js";
+import { IbossApiError, IbossError, IbossPolicyTypeError, IbossVerifyError } from "../client/errors.js";
 import { SubClient, type EntriesResponse, type SuccessResponse } from "./base.js";
 import {
   aiServicesDestination,
@@ -65,6 +65,10 @@ import {
   type CreateResourcePolicyResult,
 } from "./resourcePolicyCreate.js";
 import {
+  assertGatewayAcceptsCustomType,
+  resolveResourcePolicyKind,
+} from "./resourcePolicyKinds.js";
+import {
   assertSparsePatch,
   collectSparseVerifyFailures,
   isNativePatchUnsupported,
@@ -84,6 +88,10 @@ export {
 } from "./policyFields.js";
 
 export type { CreateResourcePolicyParams, CreateResourcePolicyResult } from "./resourcePolicyCreate.js";
+export type {
+  ResourcePolicyKind,
+  ResourcePolicyWireKindAnnotation,
+} from "./resourcePolicyKinds.js";
 
 export type PolicyLayerType = "blocklist" | "allowlist" | "categories";
 
@@ -304,8 +312,19 @@ export class PoliciesApi extends SubClient {
     isZeroTrustResourcePolicy?: 0 | 1;
     enterpriseOwned?: 0 | 1;
     placeAtPosition?: number;
+    /**
+     * Enum override. Resource-policy kinds `urlList` and `parent` are not
+     * `PolicyLayerType` values. Numeric customType 6 and 10 are rejected:
+     * Gateway returns 422 Invalid entry type until DEVELOP-34958.
+     */
+    customType?: string;
     extra?: Record<string, unknown>;
   }): Promise<CreateLayerResult> {
+    const customType = params.customType ?? CUSTOM_TYPE[params.type];
+    assertGatewayAcceptsCustomType(customType, "createLayerStructure customType");
+    if (params.extra && "customType" in params.extra) {
+      assertGatewayAcceptsCustomType(params.extra.customType, "createLayerStructure extra.customType");
+    }
     return this.request("gateway", "PUT", "/json/controls/policyLayers", {
       body: {
         customCategoryName: params.name,
@@ -315,6 +334,7 @@ export class PoliciesApi extends SubClient {
         ...(params.enterpriseOwned !== undefined ? { enterpriseOwned: params.enterpriseOwned } : {}),
         placeAtPosition: params.placeAtPosition ?? 0,
         ...params.extra,
+        ...(params.customType !== undefined ? { customType: params.customType } : {}),
       },
     });
   }
@@ -335,6 +355,7 @@ export class PoliciesApi extends SubClient {
     customCategoryName: string;
     [key: string]: unknown;
   }): Promise<SuccessResponse> {
+    assertGatewayAcceptsCustomType(settings.customType, "updateLayerSettings customType");
     await this.rejectSilentCategoryDrop(settings);
     return this.request("gateway", "POST", RESOURCE_POLICY_SETTINGS_WIRE_PATH, {
       body: settings,
@@ -389,6 +410,7 @@ export class PoliciesApi extends SubClient {
     // Reject allowlist/blocklist + a real categories bitmap before PUT.
     // The all-zero placeholder added below is not a selection.
     if (params.settings) {
+      assertGatewayAcceptsCustomType(params.settings.customType, "createLayer settings.customType");
       assertCategoriesBitmapExpressable({
         ...params.settings,
         customType: params.settings.customType ?? CUSTOM_TYPE[params.type],
@@ -445,16 +467,27 @@ export class PoliciesApi extends SubClient {
    * (`categories` length 0); the SDK throw is the guard.
    */
   async createResourcePolicy(params: CreateResourcePolicyParams): Promise<CreateResourcePolicyResult> {
-    const type = params.type ?? "categories";
+    const wire = resolveResourcePolicyKind(params);
+    const type = wire.layerType ?? "categories";
     const settingsPatch = resolveCreateSettingsPatch(params);
+    if (params.destinations && (wire.kind === "urlList" || wire.kind === "parent")) {
+      throw new IbossPolicyTypeError(
+        `kind "${wire.kind}" cannot carry categories destinations. ` +
+          `Omit destinations, or use kind "categories" for AI Services. ` +
+          `URL-list (enum e_custom_category_url_list) and parent (enum e_custom_category_type_parent) ` +
+          `are sent as enums — numeric customType 6 and 10 are rejected by Gateway until DEVELOP-34958.`,
+        { customType: wire.customType },
+      );
+    }
 
     // Reject before PUT so a doomed allowlist+destinations combo never creates
-    // a half-finished layer.
+    // a half-finished layer. urlList/parent send the enum, never numeric 6/10.
     buildCreateResourcePolicySettings({
       customCategoryId: 0,
       customCategoryNumber: 0,
       name: params.name,
       type,
+      customType: wire.customType,
       destinations: params.destinations,
       settings: settingsPatch,
     });
@@ -462,6 +495,7 @@ export class PoliciesApi extends SubClient {
     const created = await this.createLayerStructure({
       name: params.name,
       type,
+      customType: wire.customType,
       isZeroTrustResourcePolicy: 1,
       enterpriseOwned: params.enterpriseOwned,
       placeAtPosition: params.placeAtPosition,
@@ -472,6 +506,7 @@ export class PoliciesApi extends SubClient {
       customCategoryNumber: created.customCategoryNumber,
       name: params.name,
       type,
+      customType: wire.customType,
       destinations: params.destinations,
       settings: settingsPatch,
     });
@@ -495,7 +530,7 @@ export class PoliciesApi extends SubClient {
         { customCategoryId: created.customCategoryId, failures, actual: persisted },
       );
     }
-    return viewCreatedResourcePolicy(persisted, params.view ?? "summary");
+    return viewCreatedResourcePolicy(persisted, params.view ?? "summary", wire);
   }
 
   async deleteLayer(customCategoryId: number): Promise<SuccessResponse> {
