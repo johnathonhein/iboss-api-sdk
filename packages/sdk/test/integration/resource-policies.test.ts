@@ -111,6 +111,28 @@ describe("resource-policy get-merge-post fallback (DEVELOP-34914)", () => {
       expect(posted[`prio${i}`]).toBeDefined();
       expect(posted[`bypassSslMitm${i}`]).toBeDefined();
     }
+    expect(state.requests.some((line) => line.startsWith("PATCH "))).toBe(false);
+    expect(state.requests.some((line) => line.includes("/settings/patch"))).toBe(false);
+  });
+
+  it("throws when the fallback filled dlpPolicyMethod and the confirming GET dropped it", async () => {
+    const state = createMockState();
+    const client = makeClient(state);
+    const created = await client.policies.createLayer({
+      name: "AI Security Policy",
+      type: "categories",
+      isZeroTrustResourcePolicy: 1,
+    });
+    delete state.settingsById[created.customCategoryId]!.dlpPolicyMethod;
+    state.dropPostedKeys = ["dlpPolicyMethod"];
+
+    await expect(
+      client.policies.patchResourcePolicySettings(
+        created.customCategoryId,
+        { aiRiskEnabled: 1 },
+        { transport: "get-merge-post" },
+      ),
+    ).rejects.toThrow(/dlpPolicyMethod/);
   });
 });
 

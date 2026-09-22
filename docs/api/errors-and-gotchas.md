@@ -46,14 +46,16 @@ no reporting cluster provisioned).
 - **Settings payloads carry generated field families**: `cat0..cat110` (=3),
   `prio0..prio110` (=0), `bypassSslMitm0..bypassSslMitm110` (=0), and a
   400-char `categories` bitmap. Helpers: `generateCategoryFields()` etc.
-  Gateway POST **defaults omitted fields** (DEVELOP-34251 / DEVELOP-32482) —
-  never POST a partial settings blob via `updateLayerSettings`.
-  `patchResourcePolicySettings` (`transport: "auto"`) prefers native
-  Gateway PATCH (DEVELOP-34921); on 404/405 it falls back to
-  get→deep-merge→**full** POST (DEVELOP-34914). POST `?merge=1` is
+  Gateway POST **defaults omitted fields** (DEVELOP-34251 / DEVELOP-32482)
+  and can drop unrelated prior values — never POST a partial settings blob
+  via `updateLayerSettings`. `patchResourcePolicySettings`
+  (`transport: "auto"`) prefers native Gateway PATCH (DEVELOP-34921); on
+  404/405 it falls back to get→deep-merge→**full** POST (DEVELOP-34914),
+  filling only family members the GET lacked. POST `?merge=1` is
   `transport: "merge-post"` opt-in only — `auto` must not send it on a
-  pre-34921 gateway (the query would be ignored and wipe). TOCTOU on the
-  GET→POST fallback is accepted for agent v1.
+  pre-34921 gateway (the query would be ignored and wipe). Concurrent
+  writers on that GET→POST fallback: last POST wins; there is no ETag.
+  That TOCTOU window is accepted for agent v1.
 - **AI Services destination** is bit **110** of the bitmap plus
   `categoriesSelectedType: 0` (Selected Destinations — inverted enum). Use
   `putResourcePolicyDestinations` / `ensureAiSecurityDestination` /
@@ -65,8 +67,10 @@ no reporting cluster provisioned).
   ms; newly finished chats are often missing for ~15 minutes; `vendor`
   and `textContains` are SDK-side filters; domains and leaked bodies are
   redacted.
-- **Always re-GET after a settings POST.** Empty `saveIgnoredEntries` is not
-  proof the fields persisted.
+- **Always re-GET after a settings write.** Empty `saveIgnoredEntries` is not
+  proof the fields persisted. `patchResourcePolicySettings` throws
+  `IbossVerifyError` when a patch field — or a `dlpPolicyMethod` the
+  get-merge-post fallback had to fill — is missing from that GET.
 - **Server gaps the SDK papers over (do not treat the SDK as the Gateway fix):**
   - **DEVELOP-34958** — numeric `customType` 6 (`urlList`) and 10 (`parent`)
     → 422 `Invalid entry type.` `createResourcePolicy({ kind })` sends

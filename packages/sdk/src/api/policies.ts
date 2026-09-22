@@ -687,8 +687,9 @@ export class PoliciesApi extends SubClient {
    * used by `auto`: a pre-34921 gateway would ignore `merge` and wipe.
    * `updateLayerSettings(fullBlob)` stays the caller-supplied full replace.
    *
-   * Re-GETs after write. TOCTOU on the get-merge-post fallback is accepted
-   * for agent v1 (same as DEVELOP-34914).
+   * Re-GETs after write. On the get-merge-post fallback, a `dlpPolicyMethod`
+   * this helper had to fill is part of that check. TOCTOU on the fallback
+   * is accepted for agent v1: last POST wins, and there is no ETag.
    */
   async patchResourcePolicySettings(
     customCategoryId: number,
@@ -706,6 +707,7 @@ export class PoliciesApi extends SubClient {
       await this.rejectSilentCategoryDrop({ ...body, customCategoryId });
     }
 
+    let filledVerify: Record<string, unknown> = {};
     if (transport === "native-patch") {
       await this.request("gateway", "PATCH", RESOURCE_POLICY_SETTINGS_WIRE_PATH, {
         query: { customCategoryId },
@@ -719,9 +721,9 @@ export class PoliciesApi extends SubClient {
         signal: opts?.signal,
       });
     } else if (transport === "get-merge-post") {
-      await this.patchViaGetMergePost(customCategoryId, patch, opts?.signal);
+      filledVerify = await this.patchViaGetMergePost(customCategoryId, patch, opts?.signal);
     } else {
-      await this.patchAuto(customCategoryId, patch, body, opts?.signal);
+      filledVerify = await this.patchAuto(customCategoryId, patch, body, opts?.signal);
     }
 
     const persisted = await this.request<Record<string, unknown>>(
@@ -730,7 +732,10 @@ export class PoliciesApi extends SubClient {
       RESOURCE_POLICY_SETTINGS_WIRE_PATH,
       { query: { customCategoryId }, signal: opts?.signal },
     );
-    const failures = collectSparseVerifyFailures(persisted, patch);
+    const failures = [
+      ...collectSparseVerifyFailures(persisted, patch),
+      ...collectSparseVerifyFailures(persisted, filledVerify),
+    ];
     if (failures.length > 0) {
       throw new IbossVerifyError(
         `Resource policy ${customCategoryId} write reported success but GET did not persist: ` +
@@ -746,10 +751,9 @@ export class PoliciesApi extends SubClient {
     patch: ResourcePolicySettingsPatch,
     body: Record<string, unknown>,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<Record<string, unknown>> {
     if (this.nativeSettingsPatchSupported === false) {
-      await this.patchViaGetMergePost(customCategoryId, patch, signal);
-      return;
+      return this.patchViaGetMergePost(customCategoryId, patch, signal);
     }
     try {
       await this.request("gateway", "PATCH", RESOURCE_POLICY_SETTINGS_WIRE_PATH, {
@@ -758,19 +762,24 @@ export class PoliciesApi extends SubClient {
         signal,
       });
       this.nativeSettingsPatchSupported = true;
+      return {};
     } catch (error) {
       if (!isNativePatchUnsupported(error)) throw error;
       this.nativeSettingsPatchSupported = false;
-      await this.patchViaGetMergePost(customCategoryId, patch, signal);
+      return this.patchViaGetMergePost(customCategoryId, patch, signal);
     }
   }
 
-  /** DEVELOP-34914: GET → deep-merge → full POST (never a sparse replace). */
+  /**
+   * DEVELOP-34914: GET → deep-merge → full POST (never a sparse replace).
+   * Returns fields the helper filled (today: `dlpPolicyMethod: 2`) so the
+   * confirming GET can require them. Caller patch keys are verified separately.
+   */
   private async patchViaGetMergePost(
     customCategoryId: number,
     patch: ResourcePolicySettingsPatch,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<Record<string, unknown>> {
     const current = await this.request<Record<string, unknown>>(
       "gateway",
       "GET",
@@ -785,6 +794,15 @@ export class PoliciesApi extends SubClient {
       body: next,
       signal,
     });
+    const filled: Record<string, unknown> = {};
+    if (
+      patch.dlpPolicyMethod === undefined &&
+      current.dlpPolicyMethod === undefined &&
+      next.dlpPolicyMethod === 2
+    ) {
+      filled.dlpPolicyMethod = 2;
+    }
+    return filled;
   }
 
   /**

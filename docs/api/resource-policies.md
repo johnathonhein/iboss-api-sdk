@@ -39,6 +39,7 @@ same endpoints but have `isZeroTrustResourcePolicy: 0`.)
 
 `client.policies.createLayer({ isZeroTrustResourcePolicy: 1, ... })` performs
 both steps and injects `dlpPolicyMethod: 2` and the field families for you.
+It returns the ids from step 1.
 
 ## Agent helpers (DEVELOP-34914 / 34916 / 34924 / 34925 / 34926)
 
@@ -59,9 +60,19 @@ not send it: a pre-34921 gateway ignores `merge` and wipe-on-omits.
 Gateway POST applies defaults for omitted fields (same class as
 [DEVELOP-34251](https://ibosscybersecurity.atlassian.net/browse/DEVELOP-34251)
 and [DEVELOP-32482](https://ibosscybersecurity.atlassian.net/browse/DEVELOP-32482)),
-so a partial body via `updateLayerSettings` would wipe `catN` / `prioN` /
-`bypassSslMitmN`. Omitted patch keys **keep prior values**. The GET→merge→POST
-race (TOCTOU) is accepted for agent v1 on the fallback path.
+so a partial body via `updateLayerSettings` resets omitted `catN` / `prioN` /
+`bypassSslMitmN` to those defaults and drops unrelated prior fields. The
+get-merge-post fallback deep-merges the caller patch onto the full GET blob,
+fills only family members the GET lacked (an empty `categories` string is
+kept), and POSTs that complete object. Omitted patch keys **keep prior
+values**. The helper then re-GETs. `IbossVerifyError` means the write
+returned success (including an empty `saveIgnoredEntries`) but a **patch
+field** — or `dlpPolicyMethod` when the fallback had to fill it — is missing.
+Family members are in the POST body; `view: "full"` is that confirming GET.
+
+**TOCTOU / concurrent writers (accepted for agent v1, fallback only).**
+Another client can write the same policy between the GET and the POST. Last
+POST wins. There is no ETag or lock on this path.
 
 Agents should not send the 400-char `categories` bitmap or invent
 `categoriesSelectedType`. Sep 9–10 Bug Replicator traces: the settings POST
@@ -96,7 +107,7 @@ await client.policies.patchResourcePolicySettings(policy.customCategoryId, {
 | Method | What it does |
 |---|---|
 | `getResourcePolicySettings(id, { view? })` | Dedicated read. Default `summary` hides the bitmap / catN families. `full` is the wire blob. Today this wraps `GET /json/controls/policyLayers/settings`. |
-| `patchResourcePolicySettings(id, patch, { transport? })` | Sparse update. Default `auto`: native PATCH, then 404/405 get-merge-full-POST. `merge-post` is opt-in. Agents send only changed fields. Re-GETs. |
+| `patchResourcePolicySettings(id, patch, { transport? })` | Sparse update. Default `auto`: native PATCH, then 404/405 get-merge-full-POST. `merge-post` is opt-in. `get-merge-post` is the omit-safe full POST. Agents send only changed fields. Re-GETs. |
 | `getResourcePolicyDestinations` / `putResourcePolicyDestinations` | Typed destinations. AI_SERVICES → bit 110 + `categoriesSelectedType: 0`. Reject/warn allowlist+categories — never silent drop. |
 | `setDestination` / `ensureAiSecurityDestination` | Aliases of `putResourcePolicyDestinations` (AI Services shortcut). |
 | `createResourcePolicy({…})` | PUT structure + POST settings + re-GET. Returns `{ customCategoryId, customCategoryNumber, destinations, settings, wireKind }`. `kind: "urlList" \| "parent"` sends enum strings, never numeric 6/10. |
@@ -126,7 +137,7 @@ Gateway `PUT /json/controls/policyLayers` returns **422 `Invalid entry type.`** 
 | create + verify (agent) | `createResourcePolicy({…})` |
 | `GET /json/controls/policyLayers/settings?customCategoryId=` | `getLayerSettings(id)` / `getResourcePolicySettings(id)` |
 | `PATCH /json/controls/policyLayers/settings` | `patchResourcePolicySettings(id, patch)` (`transport: "auto"` / `"native-patch"`) |
-| `POST /json/controls/policyLayers/settings` | `updateLayerSettings(...)` (full replace) / `patchResourcePolicySettings` fallback / destinations write |
+| `POST /json/controls/policyLayers/settings` | `updateLayerSettings(...)` (full replace) / `patchResourcePolicySettings` fallback (`transport: "get-merge-post"`) / destinations write |
 | `DELETE /json/controls/policyLayers?customCategoryId=` | `deleteLayer(id)` |
 | `GET /json/controls/resourcePolicy/resources?customCategoryId=` | `getResourcePolicyResources(id)` |
 | `PUT /json/controls/resourcePolicy/resources?customCategoryId=` | `associateResources({ customCategoryId, customCategoryNumber, resourceIds })` |
@@ -160,8 +171,9 @@ Gotchas:
   payload; omitting it produces broken policies.
 - **`patchResourcePolicySettings` default `auto`:** native PATCH first
   (DEVELOP-34921); 404/405 → get-merge-full-POST (DEVELOP-34914). POST
-  `?merge=1` is opt-in (`transport: "merge-post"`) only. TOCTOU on the
-  fallback is accepted for agent v1.
+  `?merge=1` is opt-in (`transport: "merge-post"`) only. On the fallback,
+  last POST wins and there is no ETag. That TOCTOU window is accepted for
+  agent v1.
 - CASB-control policies are allowlist-type Resource Policies with
   `enterpriseOwned: 1`.
 - Group-targeted policies: `linkPolicyToAllSubjects: 0` +

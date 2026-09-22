@@ -147,12 +147,22 @@ describe("sparse resource-policy settings (DEVELOP-34924)", () => {
       aiRiskEnabled: 1,
     });
 
+    const posted = state.layerSettings.at(-1)!;
+    expect(posted.cat7).toBeUndefined();
+    expect(posted.note).toBeUndefined();
+    expect(posted.showPACUrl).toBeUndefined();
+
     const stored = state.settingsById[created.customCategoryId]!;
     expect(stored.aiRiskEnabled).toBe(1);
-    expect(stored.cat7).toBeUndefined();
-    expect(stored.prio3).toBeUndefined();
+    expect(stored.cat7).toBe(3);
+    expect(stored.prio3).toBe(0);
+    expect(stored.bypassSslMitm10).toBe(0);
+    expect(stored.categories).toBe("0".repeat(400));
     expect(stored.note).toBeUndefined();
-    expect(hasFieldFamily(stored, "cat")).toBe(false);
+    expect(stored.showPACUrl).toBeUndefined();
+    expect(hasFieldFamily(stored, "cat")).toBe(true);
+    expect(hasFieldFamily(stored, "prio")).toBe(true);
+    expect(hasFieldFamily(stored, "bypassSslMitm")).toBe(true);
   });
 
   it("throws IbossVerifyError when the write succeeds but GET does not persist", async () => {

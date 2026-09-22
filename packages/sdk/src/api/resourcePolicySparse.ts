@@ -22,6 +22,10 @@ import {
   ensureFieldFamilies,
   isGeneratedSettingsFamilyKey,
 } from "./policyFields.js";
+import { deepMerge } from "./resourcePolicySettings.js";
+
+/** Ignored so a sparse body cannot set `Object.prototype`. */
+const BLOCKED_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 /** Today's gateway wire path. There is no distinct resourcePolicies/{id}/settings route yet. */
 export const RESOURCE_POLICY_SETTINGS_WIRE_PATH = "/json/controls/policyLayers/settings";
@@ -53,28 +57,11 @@ export function mergePatch(target: unknown, patch: unknown): unknown {
   if (!isPlainObject(patch)) return patch;
   const out: Record<string, unknown> = isPlainObject(target) ? { ...target } : {};
   for (const [key, value] of Object.entries(patch)) {
+    if (BLOCKED_KEYS.has(key)) continue;
     if (value === null) {
       delete out[key];
     } else if (isPlainObject(value) && isPlainObject(out[key])) {
       out[key] = mergePatch(out[key], value);
-    } else {
-      out[key] = value;
-    }
-  }
-  return out;
-}
-
-/** Shallow/deep merge used by the 34914 fallback. `undefined` is skipped; `null` is kept. */
-export function deepMerge(
-  base: Record<string, unknown>,
-  patch: Record<string, unknown>,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined) continue;
-    const current = out[key];
-    if (isPlainObject(value) && isPlainObject(current)) {
-      out[key] = deepMerge(current, value);
     } else {
       out[key] = value;
     }
@@ -114,7 +101,7 @@ export function sparseSettingsBody(
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { customCategoryId };
   for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined || key === "customCategoryId") continue;
+    if (value === undefined || key === "customCategoryId" || BLOCKED_KEYS.has(key)) continue;
     body[key] = value;
   }
   return body;
@@ -124,7 +111,7 @@ export function assertSparsePatch(patch: ResourcePolicySettingsPatch): void {
   if (!isPlainObject(patch)) {
     throw new TypeError("patchResourcePolicySettings requires a plain object patch");
   }
-  const keys = Object.keys(patch).filter((key) => patch[key] !== undefined);
+  const keys = Object.keys(patch).filter((key) => patch[key] !== undefined && !BLOCKED_KEYS.has(key));
   if (keys.length === 0) {
     throw new TypeError(
       "patchResourcePolicySettings requires at least one field to change. " +

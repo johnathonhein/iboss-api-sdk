@@ -7,6 +7,7 @@
  * no listener/port required.
  */
 import { Hono } from "hono";
+import { emptyCategoriesBitmap, POLICY_FIELD_FAMILY_MAX } from "../../src/api/policyFields.js";
 import { moveProxyAclRules, normalizeProxyAclRules } from "../../src/api/proxyAcl.js";
 import {
   CLOUD_HOST,
@@ -42,7 +43,7 @@ export interface MockState {
   requestMeta: MockRequestMeta[];
   /** Policy layers created via the two-step flow. */
   policyLayers: Array<Record<string, unknown>>;
-  /** Settings payloads applied to layers (body as sent). */
+  /** Settings payloads applied to layers (raw POST/PATCH body, before omit-defaults). */
   layerSettings: Array<Record<string, unknown>>;
   /** Latest stored settings by customCategoryId (what GET returns). */
   settingsById: Record<number, Record<string, unknown>>;
@@ -68,6 +69,12 @@ export interface MockState {
   nativeSettingsMergePost: boolean;
   /** PATCH/merge-post succeeds but GET omits the patched keys. */
   dropPatchFieldsOnRead: boolean;
+  /**
+   * After a successful settings write, drop these keys from the stored blob
+   * so a confirming GET does not show them. Models "write succeeded, field
+   * did not persist."
+   */
+  dropPostedKeys: string[] | null;
   /**
    * POST settings returns success but GET omits the destination bitmap —
    * the Sep 10 "successful POST, empty saveIgnoredEntries, bit 110 missing" case.
@@ -109,6 +116,7 @@ export function createMockState(): MockState {
     nativeSettingsPatch: true,
     nativeSettingsMergePost: true,
     dropPatchFieldsOnRead: false,
+    dropPostedKeys: null,
     dropDestinationsOnPost: false,
     aiConversations: [],
     lastAiConversationQuery: null,
@@ -153,6 +161,37 @@ function mergePatch(target: Record<string, unknown>, patch: Record<string, unkno
     }
   }
   return out;
+}
+
+/**
+ * Test stand-in for Gateway settings POST omit behavior (DEVELOP-34251 /
+ * DEVELOP-32482). This is not lockboxLinux.
+ *
+ * The stored blob is the POST body with omitted `catN` / `prioN` /
+ * `bypassSslMitmN` filled to the create-time defaults (3 / 0 / 0) and an
+ * omitted `categories` bitmap filled with 400 zeros. Keys the body did not
+ * include are not copied from the previous blob, so a sparse POST drops
+ * unrelated prior fields (showPACUrl, messages, …).
+ *
+ * Do not use this to build a request body. The SDK update helper exists so
+ * callers never POST a body that would take this path.
+ */
+export function applyGatewayOmittedSettingsDefaults(
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const stored: Record<string, unknown> = { ...body };
+  for (let i = 0; i <= POLICY_FIELD_FAMILY_MAX; i++) {
+    const cat = `cat${i}`;
+    const prio = `prio${i}`;
+    const bypass = `bypassSslMitm${i}`;
+    if (!Object.prototype.hasOwnProperty.call(body, cat)) stored[cat] = 3;
+    if (!Object.prototype.hasOwnProperty.call(body, prio)) stored[prio] = 0;
+    if (!Object.prototype.hasOwnProperty.call(body, bypass)) stored[bypass] = 0;
+  }
+  if (!Object.prototype.hasOwnProperty.call(body, "categories")) {
+    stored.categories = emptyCategoriesBitmap();
+  }
+  return stored;
 }
 
 /** The single account the presented API key is scoped to (platform-faithful). */
@@ -347,12 +386,15 @@ export function createMockIboss(state: MockState): Hono {
         const layer = state.policyLayers.find((l) => l.customCategoryId === id);
         const current = (Number.isFinite(id) ? state.settingsById[id] : undefined) ?? {};
         const useMerge = method === "PATCH" || (method === "POST" && merge === "1");
-        const next = useMerge ? mergePatch(current, body) : { ...body };
+        const next = useMerge ? mergePatch(current, body) : applyGatewayOmittedSettingsDefaults(body);
         // Allowlist recreate / dropDestinationsOnPost silently drops the bitmap
         // on full POST (Sep 9–10 traces). Merge PATCH keeps existing bits.
         if (!useMerge && (isAllowlistType(layer?.customType) || state.dropDestinationsOnPost)) {
           next.categories = "";
           delete next.categoriesSelectedType;
+        }
+        if (state.dropPostedKeys) {
+          for (const key of state.dropPostedKeys) delete next[key];
         }
         if (Number.isFinite(id)) state.settingsById[id] = next;
         return {

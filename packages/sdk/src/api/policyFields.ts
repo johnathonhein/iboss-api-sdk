@@ -54,9 +54,11 @@ export function hasFieldFamily(
 }
 
 /**
- * Ensure the three generated families and a 400-char bitmap are present.
+ * Ensure the three generated families and a categories bitmap are present.
  * Existing values win — this never overwrites a field the caller or GET
- * already supplied. Used only for full-replace POST bodies.
+ * already supplied. An empty-string bitmap is kept (allowlist reads return
+ * length 0); a missing bitmap is filled with 400 zeros. Used only for
+ * full-replace POST bodies.
  */
 export function ensureFieldFamilies(settings: Record<string, unknown>): Record<string, unknown> {
   const categories =

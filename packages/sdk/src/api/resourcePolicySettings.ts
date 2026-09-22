@@ -73,8 +73,6 @@ export interface ResourcePolicySettingsSummary {
   dlpPolicyMethod?: unknown;
 }
 
-export type ResourcePolicySettingsView = ResourcePolicySettingsSummary | Record<string, unknown>;
-
 export interface MergeResult {
   next: Record<string, unknown>;
   verify: VerifyExpectation;
@@ -90,6 +88,9 @@ export interface VerifyExpectation {
 
 const META_KEYS = new Set(["destinations", "advanced", "onWrongType"]);
 
+/** Ignored on merge so a patch cannot set `Object.prototype`. */
+const BLOCKED_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
 const FLAG_KEYS = new Set([
   "aiRiskEnabled",
   "aiRiskMonitoringMessageEnabled",
@@ -98,16 +99,23 @@ const FLAG_KEYS = new Set([
 ]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
+/**
+ * Deep-merge `patch` onto `base`. `undefined` patch values are skipped.
+ * Arrays replace. Nested plain objects merge key-wise. `__proto__`,
+ * `constructor`, and `prototype` keys are ignored.
+ */
 export function deepMerge(
   base: Record<string, unknown>,
   patch: Record<string, unknown>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined) continue;
+    if (value === undefined || BLOCKED_KEYS.has(key)) continue;
     const current = out[key];
     if (isPlainObject(value) && isPlainObject(current)) {
       out[key] = deepMerge(current, value);
@@ -125,7 +133,7 @@ function asFlag(value: number | boolean): number {
 function normalizePatchFields(patch: ResourcePolicyPatch): Record<string, unknown> {
   const fields: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined || META_KEYS.has(key)) continue;
+    if (value === undefined || META_KEYS.has(key) || BLOCKED_KEYS.has(key)) continue;
     if (key === "aiRiskEngines") {
       fields.aiRiskEngines = encodeAiRiskEngines(value as AiRiskEnginesInput);
       continue;
@@ -258,8 +266,20 @@ export function collectVerifyFailures(
 
 function valuesEqual(actual: unknown, expected: unknown): boolean {
   if (actual === expected) return true;
-  if (typeof expected === "number" && Number(actual) === expected) return true;
-  if (typeof expected === "string" && String(actual) === expected) return true;
+  if (
+    typeof expected === "number" &&
+    typeof actual === "string" &&
+    actual.trim() !== "" &&
+    Number(actual) === expected
+  ) {
+    return true;
+  }
+  if (typeof expected === "string" && typeof actual === "number" && String(actual) === expected) {
+    return true;
+  }
+  if (typeof expected === "object" && expected !== null && typeof actual === "object" && actual !== null) {
+    return JSON.stringify(actual) === JSON.stringify(expected);
+  }
   return false;
 }
 
@@ -300,11 +320,4 @@ export function summarizeResourcePolicySettings(
     },
     dlpPolicyMethod: settings.dlpPolicyMethod,
   };
-}
-
-export function viewResourcePolicySettings(
-  settings: Record<string, unknown>,
-  view: "summary" | "full" = "summary",
-): ResourcePolicySettingsView {
-  return view === "full" ? settings : summarizeResourcePolicySettings(settings);
 }
