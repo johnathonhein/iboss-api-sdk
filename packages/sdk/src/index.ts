@@ -66,6 +66,8 @@ export {
   type CreateLayerResult,
   type CreateResourcePolicyParams,
   type CreateResourcePolicyResult,
+  type ResourcePolicyKind,
+  type ResourcePolicyWireKindAnnotation,
 } from "./api/policies.js";
 export {
   AI_SERVICES_BIT,
@@ -136,7 +138,7 @@ export type { PacZone, PrivateNetwork } from "./api/locations.js";
 export type { ZeroTrustResource, ListResourcesOptions } from "./api/resources.js";
 export type { FirewallRule } from "./api/firewall.js";
 export type { ContentAnalysisRule, DlpPolicyResponse } from "./api/dlp.js";
-export type { ZtnaPeer } from "./api/network.js";
+export type { ZtnaPeer, MoveProxyAclRuleParams, MoveProxyAclRuleResult } from "./api/network.js";
 export type { ProxyUser, ProxyDevice } from "./api/directory.js";
 export type { DrillDownReport, UrlLogEntry, TopNOptions } from "./api/reporting.js";
 export {

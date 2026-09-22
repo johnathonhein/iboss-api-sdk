@@ -41,6 +41,12 @@ export interface RequestOptions {
   raw?: boolean;
   signal?: AbortSignal;
   headers?: Record<string, string>;
+  /**
+   * Per-request retry override. Omitted fields use the client defaults.
+   * Position-style POSTs that are not idempotent should set `maxAttempts: 1`
+   * and re-GET before any caller-level retry (DEVELOP-34959).
+   */
+  retry?: Partial<RetryOptions>;
 }
 
 interface RequestLayerInit {
@@ -163,10 +169,11 @@ export class RequestLayer {
     allowAuthRefresh: boolean,
   ): Promise<Response> {
     let lastNetworkError: unknown;
+    const retry = { ...this.retry, ...opts.retry };
 
-    for (let attempt = 0; attempt < this.retry.maxAttempts; attempt++) {
+    for (let attempt = 0; attempt < retry.maxAttempts; attempt++) {
       if (attempt > 0) {
-        await sleep(backoffDelay(attempt - 1, this.retry), opts.signal);
+        await sleep(backoffDelay(attempt - 1, retry), opts.signal);
       }
 
       const headers = await this.buildHeaders(method, url, opts);
@@ -199,7 +206,7 @@ export class RequestLayer {
         return this.execute(tier, method, url, opts, false);
       }
 
-      if (shouldRetryStatus(method, response.status) && attempt < this.retry.maxAttempts - 1) {
+      if (shouldRetryStatus(method, response.status) && attempt < retry.maxAttempts - 1) {
         this.logger.warn(`HTTP ${response.status} on ${method} ${url} — retrying`);
         continue;
       }
@@ -208,7 +215,7 @@ export class RequestLayer {
     }
 
     throw new IbossNetworkError(
-      `Request failed after ${this.retry.maxAttempts} attempts: ${method} ${url}`,
+      `Request failed after ${retry.maxAttempts} attempts: ${method} ${url}`,
       lastNetworkError,
     );
   }
