@@ -7,6 +7,7 @@
  * no listener/port required.
  */
 import { Hono } from "hono";
+import { emptyCategoriesBitmap, POLICY_FIELD_FAMILY_MAX } from "../../src/api/policyFields.js";
 import {
   CLOUD_HOST,
   CLOUD_XSRF,
@@ -25,8 +26,19 @@ export interface MockState {
   requests: string[];
   /** Policy layers created via the two-step flow. */
   policyLayers: Array<Record<string, unknown>>;
-  /** Settings payloads applied to layers. */
+  /** Settings payloads applied to layers (raw POST body, before omit-defaults). */
   layerSettings: Array<Record<string, unknown>>;
+  /**
+   * Effective settings by customCategoryId — what GET settings returns
+   * after Gateway omit-defaults are applied to the POST body.
+   */
+  settingsById: Record<number, Record<string, unknown>>;
+  /**
+   * After a successful settings POST, drop these keys from the stored
+   * blob so a confirming GET does not show them. Models "POST succeeded,
+   * field did not persist."
+   */
+  dropPostedKeys: string[] | null;
   /** URLs added to layers. */
   layerUrls: Array<Record<string, unknown>>;
   /** Resource associations: query customCategoryId + body. */
@@ -41,11 +53,44 @@ export function createMockState(): MockState {
     requests: [],
     policyLayers: [],
     layerSettings: [],
+    settingsById: {},
     layerUrls: [],
+    dropPostedKeys: null,
     resourceAssociations: [],
     failNextGets: null,
     nextLayerId: 100,
   };
+}
+
+/**
+ * Test stand-in for Gateway settings POST omit behavior (DEVELOP-34251 /
+ * DEVELOP-32482). This is not lockboxLinux.
+ *
+ * The stored blob is the POST body with omitted `catN` / `prioN` /
+ * `bypassSslMitmN` filled to the create-time defaults (3 / 0 / 0) and an
+ * omitted `categories` bitmap filled with 400 zeros. Keys the body did not
+ * include are not copied from the previous blob, so a sparse POST drops
+ * unrelated prior fields (showPACUrl, messages, …).
+ *
+ * Do not use this to build a request body. The SDK update helper exists so
+ * callers never POST a body that would take this path.
+ */
+export function applyGatewayOmittedSettingsDefaults(
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const stored: Record<string, unknown> = { ...body };
+  for (let i = 0; i <= POLICY_FIELD_FAMILY_MAX; i++) {
+    const cat = `cat${i}`;
+    const prio = `prio${i}`;
+    const bypass = `bypassSslMitm${i}`;
+    if (!Object.prototype.hasOwnProperty.call(body, cat)) stored[cat] = 3;
+    if (!Object.prototype.hasOwnProperty.call(body, prio)) stored[prio] = 0;
+    if (!Object.prototype.hasOwnProperty.call(body, bypass)) stored[bypass] = 0;
+  }
+  if (!Object.prototype.hasOwnProperty.call(body, "categories")) {
+    stored.categories = emptyCategoriesBitmap();
+  }
+  return stored;
 }
 
 function cookieMap(header: string | undefined): Record<string, string> {
@@ -182,10 +227,33 @@ export function createMockIboss(state: MockState): Hono {
         state.policyLayers.push(layer);
         return c.json({ customCategoryId: id, customCategoryNumber: id + 1000, id, successful: true });
       });
+      gateway.get("/json/controls/policyLayers/settings", (c) => {
+        const id = Number(c.req.query("customCategoryId"));
+        if (!Number.isFinite(id)) return c.json({ message: "customCategoryId required" }, 400);
+        const layer = state.policyLayers.find((entry) => entry.customCategoryId === id);
+        const stored = state.settingsById[id];
+        if (!layer && !stored) return c.json({ message: "not found" }, 404);
+        // Identity from the structure row, then the effective settings blob.
+        return c.json({
+          ...(layer ?? {}),
+          ...(stored ?? {}),
+          customCategoryId: id,
+        });
+      });
       gateway.post("/json/controls/policyLayers/settings", async (c) => {
         const body = await c.req.json<Record<string, unknown>>();
         state.layerSettings.push(body);
-        return c.json({ successful: true });
+        const id = Number(body.customCategoryId);
+        const stored = applyGatewayOmittedSettingsDefaults(body);
+        if (state.dropPostedKeys) {
+          for (const key of state.dropPostedKeys) delete stored[key];
+        }
+        if (Number.isFinite(id)) state.settingsById[id] = stored;
+        return c.json({
+          message: "Successfully updated Resource Policy.",
+          saveIgnoredEntries: [],
+          successful: true,
+        });
       });
       gateway.get("/json/controls/policyLayers/urls", (c) => c.json({ entries: state.layerUrls }));
       gateway.put("/json/controls/policyLayers/urls", async (c) => {
