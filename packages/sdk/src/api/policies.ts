@@ -19,8 +19,36 @@
  *
  * Resource Policies MUST include dlpPolicyMethod: 2 in every settings payload
  * (createLayer adds it when isZeroTrustResourcePolicy: 1).
+ *
+ * Partial settings updates: `patchResourcePolicySettings` GETs the current
+ * blob, deep-merges the caller patch, and POSTs the full object.
+ * `updateLayerSettings` is still a caller-supplied full replace — a sparse
+ * body can wipe omitted fields. See docs/api/resource-policies.md.
  */
+import { IbossVerifyError } from "../client/errors.js";
 import { SubClient, type EntriesResponse, type SuccessResponse } from "./base.js";
+import {
+  emptyCategoriesBitmap,
+  generateBypassSslMitmFields,
+  generateCategoryFields,
+  generatePriorityFields,
+} from "./policyFields.js";
+import {
+  collectVerifyFailures,
+  mergeResourcePolicySettings,
+  summarizeResourcePolicySettings,
+  type ResourcePolicyPatch,
+  type ResourcePolicySettingsSummary,
+} from "./resourcePolicySettings.js";
+
+export {
+  emptyCategoriesBitmap,
+  generateBypassSslMitmFields,
+  generateCategoryFields,
+  generatePriorityFields,
+  POLICY_FIELD_FAMILY_MAX,
+} from "./policyFields.js";
+export type { ResourcePolicyPatch, ResourcePolicySettingsSummary } from "./resourcePolicySettings.js";
 
 export type PolicyLayerType = "blocklist" | "allowlist" | "categories";
 
@@ -52,32 +80,6 @@ export interface CreateLayerResult {
 export interface PolicyLayerUrl {
   url: string;
   [key: string]: unknown;
-}
-
-/** Fields cat0..cat110 = 3 (category action defaults). */
-export function generateCategoryFields(value = 3): Record<string, number> {
-  const fields: Record<string, number> = {};
-  for (let i = 0; i <= 110; i++) fields[`cat${i}`] = value;
-  return fields;
-}
-
-/** Fields prio0..prio110 = 0. */
-export function generatePriorityFields(value = 0): Record<string, number> {
-  const fields: Record<string, number> = {};
-  for (let i = 0; i <= 110; i++) fields[`prio${i}`] = value;
-  return fields;
-}
-
-/** Fields bypassSslMitm0..bypassSslMitm110 = 0. */
-export function generateBypassSslMitmFields(value = 0): Record<string, number> {
-  const fields: Record<string, number> = {};
-  for (let i = 0; i <= 110; i++) fields[`bypassSslMitm${i}`] = value;
-  return fields;
-}
-
-/** The 400-character all-zeros categories bitmap used in settings payloads. */
-export function emptyCategoriesBitmap(): string {
-  return "0".repeat(400);
 }
 
 export class PoliciesApi extends SubClient {
@@ -126,9 +128,13 @@ export class PoliciesApi extends SubClient {
   }
 
   /** Read the full settings of one policy layer. */
-  async getLayerSettings(customCategoryId: number): Promise<Record<string, unknown>> {
+  async getLayerSettings(
+    customCategoryId: number,
+    opts?: { signal?: AbortSignal },
+  ): Promise<Record<string, unknown>> {
     return this.request("gateway", "GET", "/json/controls/policyLayers/settings", {
       query: { customCategoryId },
+      signal: opts?.signal,
     });
   }
 
@@ -325,5 +331,115 @@ export class PoliciesApi extends SubClient {
         resourceIds: params.resourceIds,
       },
     });
+  }
+
+  /**
+   * Dedicated Resource Policy read (DEVELOP-34914). Same wire path as
+   * `getLayerSettings`: `GET /json/controls/policyLayers/settings?customCategoryId=`.
+   *
+   * Default `view` is `"full"` (the GET blob, including catN families).
+   * `view: "summary"` returns identity and a few agent-facing flags and
+   * leaves the bitmap and field families out of the result.
+   */
+  async getResourcePolicySettings(
+    customCategoryId: number,
+    opts: { view: "summary"; signal?: AbortSignal },
+  ): Promise<ResourcePolicySettingsSummary>;
+  async getResourcePolicySettings(
+    customCategoryId: number,
+    opts?: { view?: "full"; signal?: AbortSignal },
+  ): Promise<Record<string, unknown>>;
+  async getResourcePolicySettings(
+    customCategoryId: number,
+    opts?: { view?: "summary" | "full"; signal?: AbortSignal },
+  ): Promise<ResourcePolicySettingsSummary | Record<string, unknown>> {
+    const full = await this.getLayerSettings(customCategoryId, { signal: opts?.signal });
+    return opts?.view === "summary" ? summarizeResourcePolicySettings(full) : full;
+  }
+
+  /**
+   * SDK-only UPDATE (DEVELOP-34914). This is not an HTTP PATCH and there
+   * is no native Gateway merge on this endpoint.
+   *
+   * 1. GET `/json/controls/policyLayers/settings?customCategoryId=`
+   * 2. Deep-merge `patch` onto that blob. Omitted keys keep prior values,
+   *    including every catN / prioN / bypassSslMitmN member.
+   * 3. Fill family members the GET lacked so the POST cannot rely on
+   *    Gateway defaults for missing fields (DEVELOP-34251 / DEVELOP-32482).
+   * 4. POST the full merged object to `/json/controls/policyLayers/settings`.
+   * 5. GET again and return that blob. Throw `IbossVerifyError` when a
+   *    patch field (or a `dlpPolicyMethod` this helper had to fill) did not
+   *    persist. POST success and an empty `saveIgnoredEntries` are not
+   *    persistence. The returned object is the confirming GET, so a family
+   *    value that did not round-trip is visible there.
+   *
+   * Concurrent writers: another client can change the policy between steps
+   * 1 and 4. Last POST wins. That TOCTOU window is accepted for agent v1
+   * (native Gateway PATCH is DEVELOP-34921 and is out of scope here).
+   *
+   * `updateLayerSettings` stays a caller-supplied full replace. Passing it
+   * a sparse body can wipe omitted fields; use this method for patches.
+   */
+  async patchResourcePolicySettings(
+    customCategoryId: number,
+    patch: ResourcePolicyPatch,
+    opts: { view: "summary"; signal?: AbortSignal },
+  ): Promise<ResourcePolicySettingsSummary>;
+  async patchResourcePolicySettings(
+    customCategoryId: number,
+    patch: ResourcePolicyPatch,
+    opts?: { view?: "full"; signal?: AbortSignal },
+  ): Promise<Record<string, unknown>>;
+  async patchResourcePolicySettings(
+    customCategoryId: number,
+    patch: ResourcePolicyPatch,
+    opts?: { view?: "summary" | "full"; signal?: AbortSignal },
+  ): Promise<ResourcePolicySettingsSummary | Record<string, unknown>> {
+    const current = await this.getLayerSettings(customCategoryId, { signal: opts?.signal });
+    const { next, verify } = mergeResourcePolicySettings(current, patch);
+
+    await this.request("gateway", "POST", "/json/controls/policyLayers/settings", {
+      body: next,
+      signal: opts?.signal,
+    });
+
+    const persisted = await this.getLayerSettings(customCategoryId, { signal: opts?.signal });
+    const failures = collectVerifyFailures(persisted, verify);
+    if (failures.length > 0) {
+      throw new IbossVerifyError(
+        `Resource policy ${customCategoryId} settings POST reported success but GET did not ` +
+          `persist: ${failures.join("; ")}. POST success and an empty saveIgnoredEntries are not persistence.`,
+        { customCategoryId, failures, actual: persisted },
+      );
+    }
+    return opts?.view === "summary" ? summarizeResourcePolicySettings(persisted) : persisted;
+  }
+
+  /**
+   * One-shot Resource Policy create (DEVELOP-34914).
+   *
+   * Runs the existing two-step create (`createLayer` with
+   * `isZeroTrustResourcePolicy: 1`), then GETs
+   * `/json/controls/policyLayers/settings` and returns that effective
+   * settings object. `createLayer` is unchanged and still returns ids only.
+   */
+  async createResourcePolicy(params: {
+    name: string;
+    type: PolicyLayerType;
+    enterpriseOwned?: 0 | 1;
+    placeAtPosition?: number;
+    /** Merged over createLayer defaults (families, dlpPolicyMethod: 2, enabled). */
+    settings?: Record<string, unknown>;
+    signal?: AbortSignal;
+  }): Promise<Record<string, unknown>> {
+    const created = await this.createLayer({
+      name: params.name,
+      type: params.type,
+      isZeroTrustResourcePolicy: 1,
+      enterpriseOwned: params.enterpriseOwned,
+      placeAtPosition: params.placeAtPosition,
+      settings: params.settings,
+    });
+    return this.getLayerSettings(created.customCategoryId, { signal: params.signal });
   }
 }

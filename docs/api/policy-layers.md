@@ -74,7 +74,11 @@ specific default policy groups: `linkPolicyToAllSubjects: 0` with
 
 Settings payloads carry generated field families. `createLayer()` includes
 them automatically; use the helpers when hand-building a payload for
-`updateLayerSettings()` or `raw()`:
+`updateLayerSettings()` or `raw()`. A sparse settings POST can reset omitted
+`catN` / `prioN` / `bypassSslMitmN` members. Resource-policy partial updates
+belong on `patchResourcePolicySettings` (see
+[resource-policies.md](resource-policies.md)), which round-trips the full GET
+blob. The GET-then-POST race is an accepted TOCTOU window for agent v1.
 
 ```ts
 import {

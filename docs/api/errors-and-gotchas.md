@@ -42,6 +42,15 @@ no reporting cluster provisioned).
 - **Settings payloads carry generated field families**: `cat0..cat110` (=3),
   `prio0..prio110` (=0), `bypassSslMitm0..bypassSslMitm110` (=0), and a
   400-char `categories` bitmap. Helpers: `generateCategoryFields()` etc.
+  A sparse `POST /json/controls/policyLayers/settings` applies Gateway
+  defaults for omitted fields (DEVELOP-34251 / DEVELOP-32482 class) and can
+  wipe unrelated prior values. `patchResourcePolicySettings` GETs, deep-merges,
+  and POSTs the full blob. Concurrent writers between that GET and POST are
+  an accepted TOCTOU race for agent v1 — last POST wins; there is no ETag.
+- **POST success is not persistence.** `patchResourcePolicySettings` re-GETs
+  and throws `IbossVerifyError` when a patch field is missing from the
+  follow-up read. An empty `saveIgnoredEntries` does not prove the write
+  stuck. The returned value is that GET, including round-tripped families.
 - **Routed peer creation returns no UUID.** After
   `PUT /json/network/mobileClients/peer`, re-list peers and match on
   `locationUuids`/name; propagation can take seconds. Use

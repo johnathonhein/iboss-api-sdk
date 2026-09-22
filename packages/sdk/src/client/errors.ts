@@ -94,6 +94,30 @@ export class IbossNotConnectedError extends IbossError {
   }
 }
 
+/**
+ * A settings POST reported success, but the follow-up GET did not show the
+ * fields that were sent. An empty `saveIgnoredEntries` list is not persistence.
+ */
+export class IbossVerifyError extends IbossError {
+  readonly customCategoryId?: number;
+  readonly failures: string[];
+  readonly actual?: Record<string, unknown>;
+
+  constructor(
+    message: string,
+    opts?: {
+      customCategoryId?: number;
+      failures?: string[];
+      actual?: Record<string, unknown>;
+    },
+  ) {
+    super(message);
+    this.customCategoryId = opts?.customCategoryId;
+    this.failures = opts?.failures ?? [];
+    this.actual = opts?.actual;
+  }
+}
+
 /** Network-level failure (DNS, TLS, timeout) after retries were exhausted. */
 export class IbossNetworkError extends IbossError {
   readonly cause?: unknown;

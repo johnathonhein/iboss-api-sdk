@@ -43,6 +43,7 @@ export {
   IbossHostUnavailableError,
   IbossNotConnectedError,
   IbossNetworkError,
+  IbossVerifyError,
   type HttpMethod,
 } from "./client/errors.js";
 
@@ -62,6 +63,8 @@ export {
   type PolicyLayer,
   type PolicyLayerType,
   type CreateLayerResult,
+  type ResourcePolicyPatch,
+  type ResourcePolicySettingsSummary,
 } from "./api/policies.js";
 export type { PacZone, PrivateNetwork } from "./api/locations.js";
 export type { ZeroTrustResource, ListResourcesOptions } from "./api/resources.js";
