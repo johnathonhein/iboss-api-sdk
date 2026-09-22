@@ -21,7 +21,7 @@ import {
   IbossXsrfError,
   type HttpMethod,
 } from "./errors.js";
-import { accountsHostFor, baseUrlFor, type HostMap, type HostTier } from "./hosts.js";
+import { accountsHostFor, baseUrlFor, inferHostTier, type HostMap, type HostTier } from "./hosts.js";
 import type { Logger } from "./logger.js";
 import { redactHeaders } from "./redact.js";
 import { backoffDelay, DEFAULT_RETRY, shouldRetryStatus, sleep, type RetryOptions } from "./retry.js";
@@ -41,6 +41,12 @@ export interface RequestOptions {
   raw?: boolean;
   signal?: AbortSignal;
   headers?: Record<string, string>;
+  /**
+   * Per-request retry override. Omitted fields use the client defaults.
+   * Position-style POSTs that are not idempotent should set `maxAttempts: 1`
+   * and re-GET before any caller-level retry (DEVELOP-34959).
+   */
+  retry?: Partial<RetryOptions>;
 }
 
 interface RequestLayerInit {
@@ -98,7 +104,7 @@ export class RequestLayer {
     opts: RequestOptions = {},
   ): Promise<T> {
     const url = this.buildUrl(tier, path, opts);
-    const response = await this.execute(method, url, opts, /* allowAuthRefresh */ true);
+    const response = await this.execute(tier, method, url, opts, /* allowAuthRefresh */ true);
 
     if (opts.raw) return response as unknown as T;
 
@@ -156,16 +162,18 @@ export class RequestLayer {
   }
 
   private async execute(
+    tier: HostTier,
     method: HttpMethod,
     url: string,
     opts: RequestOptions,
     allowAuthRefresh: boolean,
   ): Promise<Response> {
     let lastNetworkError: unknown;
+    const retry = { ...this.retry, ...opts.retry };
 
-    for (let attempt = 0; attempt < this.retry.maxAttempts; attempt++) {
+    for (let attempt = 0; attempt < retry.maxAttempts; attempt++) {
       if (attempt > 0) {
-        await sleep(backoffDelay(attempt - 1, this.retry), opts.signal);
+        await sleep(backoffDelay(attempt - 1, retry), opts.signal);
       }
 
       const headers = await this.buildHeaders(method, url, opts);
@@ -195,38 +203,46 @@ export class RequestLayer {
       if (response.status === 401 && allowAuthRefresh && this.provider.refresh) {
         this.logger.debug("401 received — refreshing credential and retrying once");
         this.credential = await this.provider.refresh(this.credentialContext());
-        return this.execute(method, url, opts, false);
+        return this.execute(tier, method, url, opts, false);
       }
 
-      if (shouldRetryStatus(method, response.status) && attempt < this.retry.maxAttempts - 1) {
+      if (shouldRetryStatus(method, response.status) && attempt < retry.maxAttempts - 1) {
         this.logger.warn(`HTTP ${response.status} on ${method} ${url} — retrying`);
         continue;
       }
 
-      throw await this.toError(method, url, response);
+      throw await this.toError(method, url, response, tier);
     }
 
     throw new IbossNetworkError(
-      `Request failed after ${this.retry.maxAttempts} attempts: ${method} ${url}`,
+      `Request failed after ${retry.maxAttempts} attempts: ${method} ${url}`,
       lastNetworkError,
     );
   }
 
-  private async toError(method: HttpMethod, url: string, response: Response): Promise<IbossApiError> {
+  private async toError(
+    method: HttpMethod,
+    url: string,
+    response: Response,
+    tier: HostTier,
+  ): Promise<IbossApiError> {
     const body = (await response.text().catch(() => "")).slice(0, BODY_SNIPPET);
     const details = { method, url, status: response.status, body };
+    const tierHint = describeWrongTier(url, tier, this.hosts);
 
     if (response.status === 401) {
       return new IbossAuthError(
         "Authentication failed (401). The API key/token is missing, expired, revoked, " +
-          "or not valid for this cloud domain.",
+          "or not valid for this cloud domain." +
+          (tierHint ?? ""),
         details,
       );
     }
     if (response.status === 403 && MUTATING.has(method)) {
       return new IbossXsrfError(
         "Request forbidden (403). This usually means the X-XSRF-TOKEN header did not match " +
-          "the session cookie for the target host. See docs/api/errors-and-gotchas.md.",
+          "the session cookie for the target host. See docs/api/errors-and-gotchas.md." +
+          (tierHint ?? ""),
         details,
       );
     }
@@ -238,11 +254,43 @@ export class RequestLayer {
         this.subscriptionFlags,
       );
     }
-    return new IbossApiError(`HTTP ${response.status} from ${method} ${url}`, details);
+    return new IbossApiError(
+      `HTTP ${response.status} from ${method} ${url}` + (tierHint ?? ""),
+      details,
+    );
   }
 }
 
 function looksLikeJson(text: string): boolean {
   const first = text.trimStart()[0];
   return first === "{" || first === "[" || first === '"';
+}
+
+/**
+ * Agents often send a Resource Policy POST to the cloud host (or a
+ * conversation GET to gateway/cloud). The same key then looks like
+ * "access.denied" / 401 / 404 — name the expected tier.
+ */
+function describeWrongTier(url: string, usedTier: HostTier, hosts: HostMap): string | undefined {
+  let pathname: string;
+  let actualHost: string;
+  try {
+    const parsed = new URL(url);
+    pathname = parsed.pathname;
+    actualHost = parsed.hostname;
+  } catch {
+    return undefined;
+  }
+  const inferred = inferHostTier(pathname);
+  if (inferred === usedTier) return undefined;
+  const expectedHost = hosts[inferred];
+  const pieces = [
+    ` Path ${pathname} is a ${inferred} API`,
+    expectedHost ? ` (expected host ${expectedHost})` : "",
+    `, but this request was sent to the ${usedTier} host (${actualHost}).`,
+    inferred === "gateway" || inferred === "reporter"
+      ? " The same API key often gets access.denied on the cloud host for /json and /ibreports paths."
+      : "",
+  ];
+  return pieces.join("");
 }

@@ -60,7 +60,10 @@ allowlist = `e_custom_category_type_allowlist`, categories =
 
 `listLayers` filters: `isZeroTrustLayer` −1 = all policy types (default),
 0 = overlay layers only, 1 = resource policies only; `typeFilter` −1 = all
-types.
+types (**9 = DLP**). Agents should use
+`client.policies.listPolicies({ kind: "layer" | "dlp" | "connector" })`
+instead of guessing those integers — see [policies-by-kind.md](policies-by-kind.md).
+`listLayers` itself is unchanged.
 
 ## Linking to default policy groups
 
@@ -74,7 +77,13 @@ specific default policy groups: `linkPolicyToAllSubjects: 0` with
 
 Settings payloads carry generated field families. `createLayer()` includes
 them automatically; use the helpers when hand-building a payload for
-`updateLayerSettings()` or `raw()`:
+`updateLayerSettings()` or `raw()`. A sparse settings POST can reset omitted
+`catN` / `prioN` / `bypassSslMitmN` members and drop unrelated prior fields.
+Resource-policy partial updates belong on `patchResourcePolicySettings` (see
+[resource-policies.md](resource-policies.md)). Its default transport tries
+native PATCH; the get→merge→full-POST fallback round-trips the GET blob.
+That GET-then-POST race is an accepted TOCTOU window for agent v1 (last POST
+wins; no ETag).
 
 ```ts
 import {
