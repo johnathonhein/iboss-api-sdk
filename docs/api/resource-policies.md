@@ -99,10 +99,22 @@ await client.policies.patchResourcePolicySettings(policy.customCategoryId, {
 | `patchResourcePolicySettings(id, patch, { transport? })` | Sparse update. Default `auto`: native PATCH, then 404/405 get-merge-full-POST. `merge-post` is opt-in. Agents send only changed fields. Re-GETs. |
 | `getResourcePolicyDestinations` / `putResourcePolicyDestinations` | Typed destinations. AI_SERVICES → bit 110 + `categoriesSelectedType: 0`. Reject/warn allowlist+categories — never silent drop. |
 | `setDestination` / `ensureAiSecurityDestination` | Aliases of `putResourcePolicyDestinations` (AI Services shortcut). |
-| `createResourcePolicy({…})` | PUT structure + POST settings + re-GET. Returns `{ customCategoryId, customCategoryNumber, destinations, settings }`. |
+| `createResourcePolicy({…})` | PUT structure + POST settings + re-GET. Returns `{ customCategoryId, customCategoryNumber, destinations, settings, wireKind }`. `kind: "urlList" \| "parent"` sends enum strings, never numeric 6/10. |
 | `listPolicies({ kind })` | Purpose-named list. Prefer over `typeFilter=9` / choosing list endpoints. |
 
 `updateLayerSettings(fullBlob)` and `createLayer()` are unchanged full-replace / id-returning APIs.
+
+### `kind: "urlList" | "parent"` (DEVELOP-34958)
+
+Live Gateway accepts numeric `customType` 6 and 10 and echoes `{ customType, enum, listKind }` on PUT (DEVELOP-34958). The SDK still sends the enum so older nodes keep working:
+
+- `createResourcePolicy({ kind: "urlList", name })` sends `e_custom_category_url_list` (not `6`)
+- `createResourcePolicy({ kind: "parent", name })` sends `e_custom_category_type_parent` (not `10`)
+- throws `IbossPolicyTypeError` if a caller passes numeric 6 or 10
+- sets `wireKind.echoedByGateway` when the PUT body includes numeric `customType`, `enum`, and `listKind`; otherwise the fields are an SDK annotation
+- records `observedCustomType` from the verifying GET, which may already be the numeric alias
+
+`urlList` and `parent` cannot take `destinations` — those kinds have no categories bitmap. Use `kind: "categories"` for AI Services.
 
 ## Endpoints
 

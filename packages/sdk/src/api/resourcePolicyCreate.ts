@@ -34,6 +34,18 @@ import {
   ensureFieldFamilies,
   isGeneratedSettingsFamilyKey,
 } from "./policyFields.js";
+import {
+  annotateResourcePolicyKind,
+  applyGatewayCreateEcho,
+  assertGatewayAcceptsCustomType,
+  customTypeMatchesKind,
+  resolveResourcePolicyKind,
+  wireKindFromCustomType,
+  type ResourcePolicyKind,
+  type ResourcePolicyKindWire,
+  type ResourcePolicyWireKindAnnotation,
+} from "./resourcePolicyKinds.js";
+import { IbossPolicyTypeError } from "../client/errors.js";
 
 /** Today's gateway settings path. There is no distinct resourcePolicies POST yet. */
 export const RESOURCE_POLICY_SETTINGS_WIRE_PATH = "/json/controls/policyLayers/settings";
@@ -66,8 +78,17 @@ export interface CreateResourcePolicyParams {
   /** Sparse settings (DEVELOP-34924). Merged over create defaults. */
   settings?: ResourcePolicySettingsPatch;
   /**
+   * Purpose-named structure kind. `urlList` and `parent` send enum strings
+   * (`e_custom_category_url_list`, `e_custom_category_type_parent`), never
+   * numeric 6/10. Live Gateway accepts those numerics (DEVELOP-34958); the
+   * SDK still sends the enum so older nodes keep working. `kind` and `type`
+   * may both be set only when they name the same kind.
+   */
+  kind?: ResourcePolicyKind;
+  /**
    * Defaults to `"categories"` so destinations are expressable. Pass
    * `"allowlist"` for CASB-style policies and omit destinations.
+   * Prefer `kind` for `urlList` and `parent` (those are not layer types).
    */
   type?: "blocklist" | "allowlist" | "categories";
   enterpriseOwned?: 0 | 1;
@@ -96,11 +117,21 @@ export interface CreateResourcePolicyResult {
   customCategoryName?: string;
   destinations: ResourcePolicyDestinations;
   settings: Record<string, unknown>;
+  /**
+   * Kind that was sent, overlaid with the PUT echo when Gateway returns
+   * `{ customType, enum, listKind }` (DEVELOP-34958, live). `echoedByGateway`
+   * stays false on nodes that omit that echo.
+   */
+  wireKind: ResourcePolicyWireKindAnnotation;
+  /** `customType` from the verifying GET, which may be the numeric alias. */
+  observedCustomType?: unknown;
 }
 
 export interface CreateVerifyExpectation {
   destinations?: DestinationVerifyExpectation;
   fields: Record<string, unknown>;
+  /** When set, GET customType must be the enum, its numeric alias, or absent. */
+  wireKind?: ResourcePolicyKindWire;
 }
 
 const WIRE_DESTINATION_KEYS = new Set(["categories", "categoriesSelectedType", "destinations"]);
@@ -135,12 +166,13 @@ export function assertCreateSettingsPatch(settings?: ResourcePolicySettingsPatch
       );
     }
   }
+  assertGatewayAcceptsCustomType(settings.customType, "createResourcePolicy settings.customType");
 }
 
 function normalizeSettingsFields(patch: ResourcePolicySettingsPatch): Record<string, unknown> {
   const fields: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined || WIRE_DESTINATION_KEYS.has(key)) continue;
+    if (value === undefined || WIRE_DESTINATION_KEYS.has(key) || key === "customType") continue;
     if (FLAG_KEYS.has(key) && (typeof value === "boolean" || value === 0 || value === 1)) {
       fields[key] = asFlag(value as number | boolean);
       continue;
@@ -180,7 +212,10 @@ export function omitGeneratedSettingsFamilies(
 export function viewCreatedResourcePolicy(
   persisted: Record<string, unknown>,
   view: "summary" | "full" = "summary",
+  wireKind?: ResourcePolicyKindWire,
+  createResponse?: unknown,
 ): CreateResourcePolicyResult {
+  const wire = wireKind ?? resolveResourcePolicyKind({});
   return {
     customCategoryId: Number(persisted.customCategoryId),
     customCategoryNumber: Number(persisted.customCategoryNumber),
@@ -188,6 +223,8 @@ export function viewCreatedResourcePolicy(
       typeof persisted.customCategoryName === "string" ? persisted.customCategoryName : undefined,
     destinations: decodeDestinations(persisted),
     settings: view === "full" ? persisted : omitGeneratedSettingsFamilies(persisted),
+    wireKind: applyGatewayCreateEcho(annotateResourcePolicyKind(wire), createResponse),
+    observedCustomType: persisted.customType ?? persisted.categoryType,
   };
 }
 
@@ -206,15 +243,38 @@ export function buildCreateResourcePolicySettings(params: {
   customCategoryNumber: number;
   name: string;
   type: "blocklist" | "allowlist" | "categories";
+  /**
+   * Enum override for kinds that are not layer types (`urlList`, `parent`).
+   * Numeric 6/10 are rejected before this string is sent.
+   */
+  customType?: string;
   destinations?: DestinationSpec;
   settings: ResourcePolicySettingsPatch;
 }): BuiltCreateSettings {
   const customType =
-    params.type === "blocklist"
+    params.customType ??
+    (params.type === "blocklist"
       ? "e_custom_category_type_blacklist"
       : params.type === "allowlist"
         ? "e_custom_category_type_allowlist"
-        : "e_custom_category_type_categories";
+        : "e_custom_category_type_categories");
+  assertGatewayAcceptsCustomType(customType, "createResourcePolicy customType");
+  const wire = wireKindFromCustomType(customType) ?? resolveResourcePolicyKind({ type: params.type });
+  if (params.destinations && (wire.kind === "urlList" || wire.kind === "parent")) {
+    throw new IbossPolicyTypeError(
+      `kind "${wire.kind}" cannot carry categories destinations. ` +
+        `URL-list and parent resource policies have no categories bitmap. ` +
+        `Omit destinations, or use kind "categories" for AI Services (DEVELOP-34958).`,
+      { customType: wire.customType },
+    );
+  }
+  if (params.settings.customType !== undefined && params.settings.customType !== customType) {
+    assertGatewayAcceptsCustomType(params.settings.customType, "createResourcePolicy settings.customType");
+    throw new TypeError(
+      `createResourcePolicy settings.customType ${JSON.stringify(params.settings.customType)} ` +
+        `conflicts with kind/type wire "${customType}". Set kind or type instead of settings.customType.`,
+    );
+  }
 
   const seed: Record<string, unknown> = {
     customCategoryId: params.customCategoryId,
@@ -260,6 +320,7 @@ export function buildCreateResourcePolicySettings(params: {
 
   const verify: CreateVerifyExpectation = {
     destinations: destinationVerify,
+    wireKind: wire,
     fields: {
       dlpPolicyMethod: body.dlpPolicyMethod,
       customCategoryName: params.name,
@@ -286,6 +347,14 @@ export function collectCreateVerifyFailures(
   const failures: string[] = [];
   if (expected.destinations) {
     failures.push(...collectDestinationVerifyFailures(actual, expected.destinations));
+  }
+  if (expected.wireKind && !customTypeMatchesKind(actual.customType ?? actual.categoryType, expected.wireKind)) {
+    const wire = expected.wireKind;
+    failures.push(
+      `customType is ${JSON.stringify(actual.customType ?? actual.categoryType)}, expected enum ` +
+        `${wire.customType} or numeric ${wire.numeric}` +
+        `${wire.kind === "categories" ? " or 13" : ""} (GET may echo the numeric; PUT must still send the enum — DEVELOP-34958)`,
+    );
   }
   for (const [key, value] of Object.entries(expected.fields)) {
     if (value === undefined || value === null) continue;

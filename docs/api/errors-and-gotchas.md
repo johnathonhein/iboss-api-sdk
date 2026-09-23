@@ -67,6 +67,27 @@ no reporting cluster provisioned).
   redacted.
 - **Always re-GET after a settings POST.** Empty `saveIgnoredEntries` is not
   proof the fields persisted.
+- **Server gaps the SDK papers over (do not treat the SDK as the Gateway fix):**
+  - **DEVELOP-34958** — live Gateway accepts numeric `customType` 6 (`urlList`)
+    and 10 (`parent`) and echoes `{ customType, enum, listKind }` on PUT.
+    `createResourcePolicy({ kind })` still sends
+    `e_custom_category_url_list` / `e_custom_category_type_parent` so older
+    nodes keep working. `wireKind.echoedByGateway` is true only when that
+    echo is in the PUT body. Passing 6 or 10 to the SDK throws
+    `IbossPolicyTypeError` before PUT.
+  - **DEVELOP-34959** — `POST /json/network/proxy/acl/rule/position` can
+    succeed while order does not change. `moveProxyAclRule` compares GET
+    order before and after and throws `IbossVerifyError` on a silent no-op.
+    `orderRevision` is copied from the position body when present and stays
+    null on older nodes. Connection drops re-GET before a second POST.
+  - **DEVELOP-34960** — allowlist/blocklist plus a categories bitmap returns
+    **200** and drops the bitmap (`categories` length 0, including bit 110).
+    The SDK throws `IbossPolicyTypeError` before POST. Gateway still needs
+    to 4xx for non-SDK clients.
+  - **DEVELOP-34961** — reporter AI conversation list returns **400** for
+    plain `since` / `until`. `listAiConversations` rewrites those to
+    `intervalStartTime` / `intervalEndTime` and never sends the plain names.
+    Reporter still needs to accept the plain aliases.
 - **Routed peer creation returns no UUID.** After
   `PUT /json/network/mobileClients/peer`, re-list peers and match on
   `locationUuids`/name; propagation can take seconds. Use

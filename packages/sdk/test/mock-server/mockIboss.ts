@@ -7,6 +7,7 @@
  * no listener/port required.
  */
 import { Hono } from "hono";
+import { moveProxyAclRules, normalizeProxyAclRules } from "../../src/api/proxyAcl.js";
 import {
   CLOUD_HOST,
   CLOUD_XSRF,
@@ -80,6 +81,19 @@ export interface MockState {
   aiConversationVisibleAfterGets: number;
   aiConversationGetHits: number;
   nextLayerId: number;
+  /** Ordered proxy ACL rules returned by GET …/proxy/acl/rule. */
+  proxyAclRules: Array<Record<string, unknown>>;
+  /** When true, the position POST returns success and does not reorder. */
+  proxyAclPositionNoop: boolean;
+  /**
+   * Throw a socket hang-up from mockFetch AFTER the position POST is applied,
+   * this many times. Models a committed move whose response was lost.
+   */
+  proxyAclDropNextPosition: number;
+  /** Query string of the last position POST (`id` / `toId` only on the wire). */
+  lastProxyAclPositionQuery: Record<string, string> | null;
+  /** Monotonic revision returned on the position body (DEVELOP-34959). */
+  proxyAclOrderRevision: number;
 }
 
 export function createMockState(): MockState {
@@ -104,6 +118,11 @@ export function createMockState(): MockState {
     aiConversationVisibleAfterGets: 0,
     aiConversationGetHits: 0,
     nextLayerId: 100,
+    proxyAclRules: [],
+    proxyAclPositionNoop: false,
+    proxyAclDropNextPosition: 0,
+    lastProxyAclPositionQuery: null,
+    proxyAclOrderRevision: 0,
   };
 }
 
@@ -111,6 +130,8 @@ function wireCustomType(createType: unknown): unknown {
   if (createType === "e_custom_category_type_allowlist") return 1;
   if (createType === "e_custom_category_type_categories") return 3;
   if (createType === "e_custom_category_type_blacklist") return 0;
+  if (createType === "e_custom_category_url_list") return 6;
+  if (createType === "e_custom_category_type_parent") return 10;
   return createType;
 }
 
@@ -309,10 +330,32 @@ export function createMockIboss(state: MockState): Hono {
       });
       gateway.put("/json/controls/policyLayers", async (c) => {
         const body = await c.req.json<Record<string, unknown>>();
+        const rawType = body.customType;
+        if (rawType === 6 || rawType === 10 || rawType === "6" || rawType === "10") {
+          return c.json({ message: "Invalid entry type." }, 422);
+        }
         const id = state.nextLayerId++;
         const layer = { ...body, customCategoryId: id, customCategoryNumber: id + 1000 };
         state.policyLayers.push(layer);
-        return c.json({ customCategoryId: id, customCategoryNumber: id + 1000, id, successful: true });
+        const numeric = wireCustomType(body.customType);
+        const isResource =
+          body.isZeroTrustResourcePolicy === 1 || body.isZeroTrustResourcePolicy === "1";
+        const echo =
+          typeof body.customType === "string" && typeof numeric === "number"
+            ? {
+                customType: numeric,
+                enum: body.customType,
+                listKind: isResource ? "resourcePolicy" : "policyLayer",
+              }
+            : {};
+        return c.json({
+          customCategoryId: id,
+          customCategoryNumber: id + 1000,
+          id,
+          successful: true,
+          message: "Successfully added custom category.",
+          ...echo,
+        });
       });
       const applySettingsWrite = (
         method: string,
@@ -382,6 +425,28 @@ export function createMockIboss(state: MockState): Hono {
         const id = Number(c.req.query("customCategoryId"));
         state.policyLayers = state.policyLayers.filter((l) => l.customCategoryId !== id);
         return c.json({ successful: true });
+      });
+      gateway.get("/json/network/proxy/acl/rule", (c) => {
+        return c.json({ entries: state.proxyAclRules, entryType: c.req.query("entryType") ?? null });
+      });
+      gateway.post("/json/network/proxy/acl/rule/position", (c) => {
+        const id = Number(c.req.query("id"));
+        const toId = Number(c.req.query("toId"));
+        state.lastProxyAclPositionQuery = Object.fromEntries(new URL(c.req.url).searchParams.entries());
+        if (!state.proxyAclPositionNoop) {
+          const moved = moveProxyAclRules(normalizeProxyAclRules(state.proxyAclRules), id, toId);
+          state.proxyAclRules = moved.map((rule) => rule.rule);
+        }
+        state.proxyAclOrderRevision += 1;
+        return c.json({
+          message: "Success.",
+          fromIndex: id,
+          toIndex: toId,
+          resultingIndex: toId,
+          moved: state.proxyAclPositionNoop ? 0 : 1,
+          orderRevision: state.proxyAclOrderRevision,
+          successful: true,
+        });
       });
       // Simulates a module the account is not subscribed to.
       gateway.put("/json/contentAnalysisRule/dlpPolicyResponse", (c) =>
@@ -468,6 +533,18 @@ export function createMockIboss(state: MockState): Hono {
 /** A fetch-compatible function that routes requests into the mock app. */
 export function mockFetch(state: MockState): typeof globalThis.fetch {
   const app = createMockIboss(state);
-  return ((input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
-    app.fetch(new Request(input, init))) as typeof globalThis.fetch;
+  return (async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+    const request = new Request(input, init);
+    const response = await app.fetch(request);
+    const path = new URL(request.url).pathname;
+    if (
+      state.proxyAclDropNextPosition > 0 &&
+      request.method === "POST" &&
+      path === "/json/network/proxy/acl/rule/position"
+    ) {
+      state.proxyAclDropNextPosition -= 1;
+      throw new TypeError("socket hang up");
+    }
+    return response;
+  }) as typeof globalThis.fetch;
 }

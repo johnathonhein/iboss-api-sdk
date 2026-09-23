@@ -114,9 +114,13 @@ examples/                  small runnable library scripts
   / `getResourcePolicyDestinations` / `setDestination` /
   `ensureAiSecurityDestination` (AI_SERVICES → bit 110; allowlist +
   categories reject/warn, never silent drop); `createResourcePolicy`
-  returns the verified re-GET shape. Copy-paste:
+  returns the verified re-GET shape. `kind: "urlList" | "parent"` sends
+  enum strings, never numeric customType 6/10 (DEVELOP-34958). Copy-paste:
   [docs/api/agent-quickstart.md](docs/api/agent-quickstart.md). Detail:
   [docs/api/resource-policies.md](docs/api/resource-policies.md).
+- **Proxy ACL order:** `client.network.moveProxyAclRule({ id, toId })`
+  re-GETs and throws `IbossVerifyError` when the position POST is a silent
+  no-op (DEVELOP-34959). `beforeRuleId` / `afterRuleId` are SDK aliases.
 - **`listPolicies({ kind })`:** purpose-named policy query
   (DEVELOP-34927). Do not guess `typeFilter=9` or choose between
   `resourcePolicies` and `policyLayers/all`. Helpers:
