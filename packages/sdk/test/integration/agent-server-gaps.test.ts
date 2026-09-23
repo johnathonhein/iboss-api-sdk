@@ -33,7 +33,7 @@ describe("Braxton resource-policy kinds (DEVELOP-34958)", () => {
       customType: "e_custom_category_url_list",
       numeric: 6,
       listKind: "resourcePolicy",
-      echoedByGateway: false,
+      echoedByGateway: true,
     });
     expect(policy.observedCustomType).toBe(6);
     expect(policy.settings.dlpPolicyMethod).toBe(2);
@@ -48,7 +48,8 @@ describe("Braxton resource-policy kinds (DEVELOP-34958)", () => {
     });
     expect(state.policyLayers[0]?.customType).toBe("e_custom_category_type_parent");
     expect(policy.wireKind.numeric).toBe(10);
-    expect(policy.wireKind.echoedByGateway).toBe(false);
+    expect(policy.wireKind.echoedByGateway).toBe(true);
+    expect(policy.wireKind.listKind).toBe("resourcePolicy");
     expect(policy.observedCustomType).toBe(10);
   });
 
@@ -88,7 +89,8 @@ describe("moveProxyAclRule (DEVELOP-34959)", () => {
     const client = makeClient(state);
     const result = await client.network.moveProxyAclRule({ id: 1, toId: 3 });
     expect(result.moved).toBe(true);
-    expect(result.orderRevision).toBeNull();
+    expect(result.orderRevision).toBe(1);
+    expect(result.resultingIndex).toBe(3);
     expect(result.orderAfter).toEqual(["name:A", "name:C", "name:D", "name:B"]);
     expect(result.attempts).toBe(1);
     expect(state.proxyAclRules.map((rule) => rule.name)).toEqual(["A", "C", "D", "B"]);

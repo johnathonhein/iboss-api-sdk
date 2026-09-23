@@ -13,7 +13,7 @@ toggles.
 | `GET /json/network/proxy/acl/rule?entryType=2` | `listProxyAclRules(entryType?)` |
 | `POST /json/network/proxy/acl/rule/position?id=&toId=` | `moveProxyAclRule({ id, toId })` |
 
-`moveProxyAclRule` re-GETs rule order after the position POST. Gateway can return success while the order is unchanged (DEVELOP-34959). The SDK throws `IbossVerifyError` on that silent no-op and does not trust the POST body. `orderRevision` on the result is always `null` until Gateway returns one.
+`moveProxyAclRule` re-GETs rule order after the position POST. Gateway can return success while the order is unchanged (DEVELOP-34959). The SDK throws `IbossVerifyError` on that silent no-op and does not trust the POST `moved` flag. When the position body includes `orderRevision` / `resultingIndex`, those fields are copied onto the result; otherwise `orderRevision` stays `null`.
 
 `beforeRuleId` / `afterRuleId` are client-side aliases resolved to `toId`. They are not sent. A dropped connection re-GETs before any second POST — the position call is not idempotent, so the request layer does not retry it on its own. `id` and `toId` are absolute ACL-map indices from the entryType=2 list.
 

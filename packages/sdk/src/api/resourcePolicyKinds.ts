@@ -1,9 +1,11 @@
 /**
  * Purpose-named Resource Policy kinds (DEVELOP-34958).
  *
- * Gateway `PUT /json/controls/policyLayers` rejects numeric `customType` 6
- * and 10 with 422 `Invalid entry type.` Enum strings work. This module maps
- * agent kinds to those enums and never emits the numerics.
+ * Gateway `PUT /json/controls/policyLayers` used to reject numeric `customType`
+ * 6 and 10 with 422 `Invalid entry type.` Live nodes accept those numerics
+ * and echo `{ customType, enum, listKind }` (DEVELOP-34958). This module still
+ * maps agent kinds to the enum strings and never emits the numerics, so the
+ * same call works on older nodes.
  *
  * | kind         | enum                              | numeric (not sent) |
  * | ------------ | --------------------------------- | ------------------ |
@@ -13,8 +15,10 @@
  * | urlList      | e_custom_category_url_list        | 6                  |
  * | parent       | e_custom_category_type_parent     | 10                 |
  *
- * Gateway does not yet echo `{ numeric, enum, listKind }` (DEVELOP-34958).
- * `wireKind` on create results is an SDK annotation (`echoedByGateway: false`).
+ * Live Gateway (DEVELOP-34958) accepts numeric 6/10 and echoes
+ * `{ customType, enum, listKind }` on PUT. `createResourcePolicy({ kind })`
+ * still sends the enum (works on older nodes). `wireKind.echoedByGateway`
+ * is true only when that PUT body actually contains the echo.
  */
 import { IbossPolicyTypeError } from "../client/errors.js";
 
@@ -68,13 +72,16 @@ export const RESOURCE_POLICY_KIND_WIRE: Record<ResourcePolicyKind, ResourcePolic
   },
 };
 
-/** SDK-attached kind echo. Gateway does not return this object yet. */
+/**
+ * Kind attached to a create result. `echoedByGateway` is false when the SDK
+ * filled the fields itself (older nodes omit the echo).
+ */
 export interface ResourcePolicyWireKindAnnotation {
   kind: ResourcePolicyKind;
   customType: string;
   numeric: number;
-  listKind: "resourcePolicy";
-  echoedByGateway: false;
+  listKind: "resourcePolicy" | "policyLayer";
+  echoedByGateway: boolean;
 }
 
 export function annotateResourcePolicyKind(wire: ResourcePolicyKindWire): ResourcePolicyWireKindAnnotation {
@@ -84,6 +91,43 @@ export function annotateResourcePolicyKind(wire: ResourcePolicyKindWire): Resour
     numeric: wire.numeric,
     listKind: "resourcePolicy",
     echoedByGateway: false,
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
+    return Number(value);
+  }
+  return undefined;
+}
+
+/**
+ * Overlay a live PUT `/json/controls/policyLayers` echo onto the SDK annotation.
+ * The live body is flat: `{ customCategoryId, customType: <numeric>, enum, listKind, message }`.
+ * Missing any of numeric `customType`, `enum`, or `listKind` leaves the annotation unchanged.
+ */
+export function applyGatewayCreateEcho(
+  annotation: ResourcePolicyWireKindAnnotation,
+  createResponse: unknown,
+): ResourcePolicyWireKindAnnotation {
+  if (!isPlainObject(createResponse)) return annotation;
+  const enumName = typeof createResponse.enum === "string" ? createResponse.enum.trim() : "";
+  const listKind = createResponse.listKind;
+  const numeric = finiteNumber(createResponse.customType);
+  if (!enumName || numeric === undefined) return annotation;
+  if (listKind !== "resourcePolicy" && listKind !== "policyLayer") return annotation;
+  const fromEnum = wireKindFromCustomType(enumName);
+  return {
+    kind: fromEnum?.kind ?? annotation.kind,
+    customType: enumName,
+    numeric,
+    listKind,
+    echoedByGateway: true,
   };
 }
 
@@ -139,9 +183,9 @@ function rejectedNumericCustomType(value: number | string, where: string): Iboss
   const kind: ResourcePolicyKind = value === 6 || value === "6" ? "urlList" : "parent";
   const wire = RESOURCE_POLICY_KIND_WIRE[kind];
   return new IbossPolicyTypeError(
-    `${where} is numeric customType ${value}. Gateway PUT /json/controls/policyLayers ` +
-      `returns 422 Invalid entry type for customType 6 and 10 until DEVELOP-34958 accepts those numerics. ` +
-      `Use createResourcePolicy({ kind: "${kind}", ... }) which sends "${wire.customType}" and does not send ${value}.`,
+    `${where} is numeric customType ${value}. ` +
+      `Use createResourcePolicy({ kind: "${kind}", ... }) which sends "${wire.customType}" and does not send ${value}. ` +
+      `Live Gateway accepts numeric 6 and 10 (DEVELOP-34958); the SDK still refuses them so older nodes are not sent a value they reject.`,
     { customType: value },
   );
 }

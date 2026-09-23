@@ -5,6 +5,8 @@ import {
   buildCreateResourcePolicySettings,
 } from "../../src/api/resourcePolicyCreate.js";
 import {
+  annotateResourcePolicyKind,
+  applyGatewayCreateEcho,
   assertGatewayAcceptsCustomType,
   customTypeMatchesKind,
   resolveResourcePolicyKind,
@@ -51,6 +53,29 @@ describe("resource policy kinds (DEVELOP-34958)", () => {
     ).toThrow(/urlList/);
     expect(() => resolveResourcePolicyKind({ kind: "urlList", type: "categories" })).toThrow(/does not match/);
     expect(resolveResourcePolicyKind({ kind: "allowlist", type: "allowlist" }).kind).toBe("allowlist");
+  });
+
+  it("overlays the live PUT echo and ignores a body that omits it", () => {
+    const annotation = annotateResourcePolicyKind(RESOURCE_POLICY_KIND_WIRE.urlList);
+    expect(annotation.echoedByGateway).toBe(false);
+    expect(
+      applyGatewayCreateEcho(annotation, {
+        customCategoryId: 4,
+        customType: 6,
+        enum: "e_custom_category_url_list",
+        listKind: "resourcePolicy",
+        message: "Successfully added custom category.",
+      }),
+    ).toEqual({
+      kind: "urlList",
+      customType: "e_custom_category_url_list",
+      numeric: 6,
+      listKind: "resourcePolicy",
+      echoedByGateway: true,
+    });
+    expect(applyGatewayCreateEcho(annotation, { customCategoryId: 4, successful: true })).toEqual(
+      annotation,
+    );
   });
 
   it("accepts enum, numeric alias, or categories 13 on GET", () => {

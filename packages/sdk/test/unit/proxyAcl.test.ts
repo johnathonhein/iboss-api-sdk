@@ -3,6 +3,7 @@ import {
   moveProxyAclRules,
   normalizeProxyAclRules,
   proxyAclOrderKeys,
+  readProxyAclPositionEcho,
   resolveProxyAclDestination,
 } from "../../src/api/proxyAcl.js";
 
@@ -44,6 +45,27 @@ describe("proxy ACL order (DEVELOP-34959)", () => {
 
   it("treats an already-adjacent alias as a no-op toId", () => {
     expect(resolveProxyAclDestination(rules, { id: 0, beforeRuleId: 1 }).toIndex).toBe(0);
+  });
+
+  it("reads the live position echo and leaves orderRevision null when absent", () => {
+    expect(
+      readProxyAclPositionEcho({
+        fromIndex: 2,
+        toIndex: 3,
+        resultingIndex: 3,
+        moved: 1,
+        orderRevision: 7,
+        message: "Success.",
+      }),
+    ).toEqual({
+      fromIndex: 2,
+      toIndex: 3,
+      resultingIndex: 3,
+      moved: true,
+      orderRevision: 7,
+    });
+    expect(readProxyAclPositionEcho({ successful: true }).orderRevision).toBeNull();
+    expect(readProxyAclPositionEcho({ moved: 0 }).moved).toBe(false);
   });
 
   it("requires exactly one destination selector", () => {

@@ -36,6 +36,7 @@ import {
 } from "./policyFields.js";
 import {
   annotateResourcePolicyKind,
+  applyGatewayCreateEcho,
   assertGatewayAcceptsCustomType,
   customTypeMatchesKind,
   resolveResourcePolicyKind,
@@ -79,9 +80,9 @@ export interface CreateResourcePolicyParams {
   /**
    * Purpose-named structure kind. `urlList` and `parent` send enum strings
    * (`e_custom_category_url_list`, `e_custom_category_type_parent`), never
-   * numeric 6/10 — Gateway returns 422 Invalid entry type for those numerics
-   * until DEVELOP-34958. `kind` and `type` may both be set only when they
-   * name the same kind.
+   * numeric 6/10. Live Gateway accepts those numerics (DEVELOP-34958); the
+   * SDK still sends the enum so older nodes keep working. `kind` and `type`
+   * may both be set only when they name the same kind.
    */
   kind?: ResourcePolicyKind;
   /**
@@ -117,9 +118,9 @@ export interface CreateResourcePolicyResult {
   destinations: ResourcePolicyDestinations;
   settings: Record<string, unknown>;
   /**
-   * SDK annotation of the enum that was sent. Gateway does not echo
-   * `{ numeric, enum, listKind }` yet (DEVELOP-34958). `echoedByGateway` is
-   * always false.
+   * Kind that was sent, overlaid with the PUT echo when Gateway returns
+   * `{ customType, enum, listKind }` (DEVELOP-34958, live). `echoedByGateway`
+   * stays false on nodes that omit that echo.
    */
   wireKind: ResourcePolicyWireKindAnnotation;
   /** `customType` from the verifying GET, which may be the numeric alias. */
@@ -212,6 +213,7 @@ export function viewCreatedResourcePolicy(
   persisted: Record<string, unknown>,
   view: "summary" | "full" = "summary",
   wireKind?: ResourcePolicyKindWire,
+  createResponse?: unknown,
 ): CreateResourcePolicyResult {
   const wire = wireKind ?? resolveResourcePolicyKind({});
   return {
@@ -221,7 +223,7 @@ export function viewCreatedResourcePolicy(
       typeof persisted.customCategoryName === "string" ? persisted.customCategoryName : undefined,
     destinations: decodeDestinations(persisted),
     settings: view === "full" ? persisted : omitGeneratedSettingsFamilies(persisted),
-    wireKind: annotateResourcePolicyKind(wire),
+    wireKind: applyGatewayCreateEcho(annotateResourcePolicyKind(wire), createResponse),
     observedCustomType: persisted.customType ?? persisted.categoryType,
   };
 }

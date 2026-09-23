@@ -17,6 +17,7 @@ import {
   moveProxyAclRules,
   normalizeProxyAclRules,
   proxyAclOrderKeys,
+  readProxyAclPositionEcho,
   resolveProxyAclDestination,
   sameProxyAclOrder,
   type ProxyAclRuleRef,
@@ -58,10 +59,12 @@ export interface MoveProxyAclRuleResult {
   orderBefore: string[];
   orderAfter: string[];
   /**
-   * Gateway does not return an order revision yet (DEVELOP-34959). Always null
-   * until the position response includes one.
+   * From the position response when Gateway sends `orderRevision` (DEVELOP-34959).
+   * Null when the field is absent, or when no POST was sent.
    */
-  orderRevision: null;
+  orderRevision: number | null;
+  /** From the position response when Gateway sends `resultingIndex`. */
+  resultingIndex?: number;
   /**
    * Raw position response. It may claim success when `moved` is false — the
    * SDK does not trust it. Undefined when no POST was sent (already in place).
@@ -114,7 +117,9 @@ export class NetworkApi extends SubClient {
    * re-GETs and only POSTs again when the order did not already change.
    *
    * `beforeRuleId` / `afterRuleId` are client-side aliases. The wire call is
-   * still `id` + `toId`. `orderRevision` is always null until Gateway returns one.
+   * still `id` + `toId`. `orderRevision` is copied from the position body when
+   * present and stays null on older nodes. `moved` on the SDK result follows
+   * the re-GET, not the POST `moved` flag.
    */
   async moveProxyAclRule(params: MoveProxyAclRuleParams): Promise<MoveProxyAclRuleResult> {
     const entryType = params.entryType ?? 2;
@@ -142,13 +147,15 @@ export class NetworkApi extends SubClient {
       const current = tryNo === 0 ? before : await this.listProxyAclRules(entryType, params.signal);
       const currentOrder = proxyAclOrderKeys(current);
       if (sameProxyAclOrder(currentOrder, expected)) {
+        const echo = readProxyAclPositionEcho(response);
         return {
           fromIndex,
           toIndex,
           moved: true,
           orderBefore,
           orderAfter: currentOrder,
-          orderRevision: null,
+          orderRevision: echo.orderRevision,
+          ...(echo.resultingIndex !== undefined ? { resultingIndex: echo.resultingIndex } : {}),
           response,
           attempts,
         };
@@ -172,13 +179,15 @@ export class NetworkApi extends SubClient {
       const recovered = await this.listProxyAclRules(entryType, params.signal);
       const recoveredOrder = proxyAclOrderKeys(recovered);
       if (sameProxyAclOrder(recoveredOrder, expected)) {
+        const echo = readProxyAclPositionEcho(response);
         return {
           fromIndex,
           toIndex,
           moved: true,
           orderBefore,
           orderAfter: recoveredOrder,
-          orderRevision: null,
+          orderRevision: echo.orderRevision,
+          ...(echo.resultingIndex !== undefined ? { resultingIndex: echo.resultingIndex } : {}),
           response,
           attempts,
         };
@@ -188,12 +197,12 @@ export class NetworkApi extends SubClient {
 
     const after = await this.listProxyAclRules(entryType, params.signal);
     const orderAfter = proxyAclOrderKeys(after);
+    const echo = readProxyAclPositionEcho(response);
     if (!sameProxyAclOrder(orderAfter, expected)) {
       throw new IbossVerifyError(
         `POST /json/network/proxy/acl/rule/position reported success but rule order did not change ` +
           `(id ${fromIndex} → toId ${toIndex}). Gateway can return success on a silent no-op ` +
-          `(DEVELOP-34959). Do not trust the position response; compare GET order before and after. ` +
-          `orderRevision is not provided by Gateway yet.`,
+          `(DEVELOP-34959). Do not trust the position response; compare GET order before and after.`,
         {
           failures: [
             `order stayed ${orderAfter.join(" | ") || "(empty)"}; expected ${expected.join(" | ")}`,
@@ -204,7 +213,7 @@ export class NetworkApi extends SubClient {
             orderBefore,
             orderAfter,
             response: response ?? null,
-            orderRevision: null,
+            orderRevision: echo.orderRevision,
           },
         },
       );
@@ -215,7 +224,8 @@ export class NetworkApi extends SubClient {
       moved: true,
       orderBefore,
       orderAfter,
-      orderRevision: null,
+      orderRevision: echo.orderRevision,
+      ...(echo.resultingIndex !== undefined ? { resultingIndex: echo.resultingIndex } : {}),
       response,
       attempts,
     };

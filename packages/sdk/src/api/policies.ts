@@ -314,8 +314,9 @@ export class PoliciesApi extends SubClient {
     placeAtPosition?: number;
     /**
      * Enum override. Resource-policy kinds `urlList` and `parent` are not
-     * `PolicyLayerType` values. Numeric customType 6 and 10 are rejected:
-     * Gateway returns 422 Invalid entry type until DEVELOP-34958.
+     * `PolicyLayerType` values. Numeric customType 6 and 10 are rejected
+     * here even though live Gateway accepts them (DEVELOP-34958): the SDK
+     * sends the enum via `kind` instead.
      */
     customType?: string;
     extra?: Record<string, unknown>;
@@ -530,7 +531,7 @@ export class PoliciesApi extends SubClient {
         { customCategoryId: created.customCategoryId, failures, actual: persisted },
       );
     }
-    return viewCreatedResourcePolicy(persisted, params.view ?? "summary", wire);
+    return viewCreatedResourcePolicy(persisted, params.view ?? "summary", wire, created);
   }
 
   async deleteLayer(customCategoryId: number): Promise<SuccessResponse> {

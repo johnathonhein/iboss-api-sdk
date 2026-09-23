@@ -92,6 +92,8 @@ export interface MockState {
   proxyAclDropNextPosition: number;
   /** Query string of the last position POST (`id` / `toId` only on the wire). */
   lastProxyAclPositionQuery: Record<string, string> | null;
+  /** Monotonic revision returned on the position body (DEVELOP-34959). */
+  proxyAclOrderRevision: number;
 }
 
 export function createMockState(): MockState {
@@ -120,6 +122,7 @@ export function createMockState(): MockState {
     proxyAclPositionNoop: false,
     proxyAclDropNextPosition: 0,
     lastProxyAclPositionQuery: null,
+    proxyAclOrderRevision: 0,
   };
 }
 
@@ -334,7 +337,25 @@ export function createMockIboss(state: MockState): Hono {
         const id = state.nextLayerId++;
         const layer = { ...body, customCategoryId: id, customCategoryNumber: id + 1000 };
         state.policyLayers.push(layer);
-        return c.json({ customCategoryId: id, customCategoryNumber: id + 1000, id, successful: true });
+        const numeric = wireCustomType(body.customType);
+        const isResource =
+          body.isZeroTrustResourcePolicy === 1 || body.isZeroTrustResourcePolicy === "1";
+        const echo =
+          typeof body.customType === "string" && typeof numeric === "number"
+            ? {
+                customType: numeric,
+                enum: body.customType,
+                listKind: isResource ? "resourcePolicy" : "policyLayer",
+              }
+            : {};
+        return c.json({
+          customCategoryId: id,
+          customCategoryNumber: id + 1000,
+          id,
+          successful: true,
+          message: "Successfully added custom category.",
+          ...echo,
+        });
       });
       const applySettingsWrite = (
         method: string,
@@ -416,7 +437,16 @@ export function createMockIboss(state: MockState): Hono {
           const moved = moveProxyAclRules(normalizeProxyAclRules(state.proxyAclRules), id, toId);
           state.proxyAclRules = moved.map((rule) => rule.rule);
         }
-        return c.json({ successful: true });
+        state.proxyAclOrderRevision += 1;
+        return c.json({
+          message: "Success.",
+          fromIndex: id,
+          toIndex: toId,
+          resultingIndex: toId,
+          moved: state.proxyAclPositionNoop ? 0 : 1,
+          orderRevision: state.proxyAclOrderRevision,
+          successful: true,
+        });
       });
       // Simulates a module the account is not subscribed to.
       gateway.put("/json/contentAnalysisRule/dlpPolicyResponse", (c) =>

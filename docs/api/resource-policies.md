@@ -106,12 +106,12 @@ await client.policies.patchResourcePolicySettings(policy.customCategoryId, {
 
 ### `kind: "urlList" | "parent"` (DEVELOP-34958)
 
-Gateway `PUT /json/controls/policyLayers` returns **422 `Invalid entry type.`** for numeric `customType` 6 and 10. Enum strings work. Until Gateway accepts the numerics and echoes `{ numeric, enum, listKind }`, the SDK:
+Live Gateway accepts numeric `customType` 6 and 10 and echoes `{ customType, enum, listKind }` on PUT (DEVELOP-34958). The SDK still sends the enum so older nodes keep working:
 
 - `createResourcePolicy({ kind: "urlList", name })` sends `e_custom_category_url_list` (not `6`)
 - `createResourcePolicy({ kind: "parent", name })` sends `e_custom_category_type_parent` (not `10`)
 - throws `IbossPolicyTypeError` if a caller passes numeric 6 or 10
-- attaches `wireKind` on the result with `echoedByGateway: false` (SDK annotation, not a Gateway field)
+- sets `wireKind.echoedByGateway` when the PUT body includes numeric `customType`, `enum`, and `listKind`; otherwise the fields are an SDK annotation
 - records `observedCustomType` from the verifying GET, which may already be the numeric alias
 
 `urlList` and `parent` cannot take `destinations` — those kinds have no categories bitmap. Use `kind: "categories"` for AI Services.

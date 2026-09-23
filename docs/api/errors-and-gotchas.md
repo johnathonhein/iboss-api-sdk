@@ -68,17 +68,18 @@ no reporting cluster provisioned).
 - **Always re-GET after a settings POST.** Empty `saveIgnoredEntries` is not
   proof the fields persisted.
 - **Server gaps the SDK papers over (do not treat the SDK as the Gateway fix):**
-  - **DEVELOP-34958** — numeric `customType` 6 (`urlList`) and 10 (`parent`)
-    → 422 `Invalid entry type.` `createResourcePolicy({ kind })` sends
-    `e_custom_category_url_list` / `e_custom_category_type_parent`. `wireKind`
-    is an SDK annotation (`echoedByGateway: false`); Gateway does not echo
-    `{ numeric, enum, listKind }` yet. Passing 6 or 10 throws
+  - **DEVELOP-34958** — live Gateway accepts numeric `customType` 6 (`urlList`)
+    and 10 (`parent`) and echoes `{ customType, enum, listKind }` on PUT.
+    `createResourcePolicy({ kind })` still sends
+    `e_custom_category_url_list` / `e_custom_category_type_parent` so older
+    nodes keep working. `wireKind.echoedByGateway` is true only when that
+    echo is in the PUT body. Passing 6 or 10 to the SDK throws
     `IbossPolicyTypeError` before PUT.
   - **DEVELOP-34959** — `POST /json/network/proxy/acl/rule/position` can
     succeed while order does not change. `moveProxyAclRule` compares GET
     order before and after and throws `IbossVerifyError` on a silent no-op.
-    `orderRevision` is always null. Connection drops re-GET before a second
-    POST.
+    `orderRevision` is copied from the position body when present and stays
+    null on older nodes. Connection drops re-GET before a second POST.
   - **DEVELOP-34960** — allowlist/blocklist plus a categories bitmap returns
     **200** and drops the bitmap (`categories` length 0, including bit 110).
     The SDK throws `IbossPolicyTypeError` before POST. Gateway still needs

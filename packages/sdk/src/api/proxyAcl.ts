@@ -14,8 +14,11 @@
  *
  * Order model: remove the rule at `id`, then insert it at the list slot of
  * `toId` (standard list move). `beforeRuleId` / `afterRuleId` are SDK aliases
- * resolved to that `toId`. Gateway does not accept those names, and it does
- * not yet return `{ fromIndex, toIndex, orderRevision, moved }`.
+ * resolved to that `toId`. Gateway does not accept those names.
+ * Live position responses include `{ fromIndex, toIndex, resultingIndex, moved, orderRevision }`
+ * (DEVELOP-34959). `readProxyAclPositionEcho` surfaces that; a missing
+ * `orderRevision` stays null so older nodes still work. GET order remains
+ * the check for a silent success.
  */
 
 export interface ProxyAclRuleRef {
@@ -162,4 +165,42 @@ export function moveProxyAclRules(
   const [item] = next.splice(fromPos, 1);
   next.splice(toPos, 0, item!);
   return next;
+}
+
+export interface ProxyAclPositionEcho {
+  fromIndex?: number;
+  toIndex?: number;
+  resultingIndex?: number;
+  moved?: boolean;
+  orderRevision: number | null;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
+    return Number(value);
+  }
+  return undefined;
+}
+
+/**
+ * Read the live position body. `moved` is 0/1 on the wire. Absent
+ * `orderRevision` stays null (pre-34959 nodes).
+ */
+export function readProxyAclPositionEcho(body: unknown): ProxyAclPositionEcho {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return { orderRevision: null };
+  }
+  const record = body as Record<string, unknown>;
+  const movedRaw = record.moved;
+  let moved: boolean | undefined;
+  if (movedRaw === true || movedRaw === 1 || movedRaw === "1") moved = true;
+  else if (movedRaw === false || movedRaw === 0 || movedRaw === "0") moved = false;
+  return {
+    fromIndex: finiteNumber(record.fromIndex),
+    toIndex: finiteNumber(record.toIndex),
+    resultingIndex: finiteNumber(record.resultingIndex),
+    moved,
+    orderRevision: finiteNumber(record.orderRevision) ?? null,
+  };
 }
